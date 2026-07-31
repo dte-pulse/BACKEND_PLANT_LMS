@@ -1,0 +1,14 @@
+[Unit]
+Description=Celery Worker for Plant LMS
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/plant-lms/Backend
+Environment="PATH=/var/www/plant-lms/Backend/venv/bin"
+EnvironmentFile=/var/www/plant-lms/Backend/.env
+ExecStart=/var/www/plant-lms/Backend/venv/bin/celery -A app.celery_app.celery_app worker --loglevel=info
+
+[Install]
+WantedBy=multi-user.target

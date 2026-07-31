@@ -1,0 +1,99 @@
+# ── Virtual environments ───────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# ── Environment variables ──────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ── Python bytecode ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# ── Distribution / packaging ───────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# ── Testing & coverage ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.coveragerc
+nosetests.xml
+test-results/
+.tox/
+
+# ── Alembic migrations ─────────────────────────────────────────
+# Keep migration scripts; ignore compiled artefacts
+alembic/versions/*.pyc
+alembic/versions/__pycache__/
+
+# ── Celery ─────────────────────────────────────────────────────
+celerybeat-schedule
+celerybeat.pid
+celery-worker.pid
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+
+# ── Local file storage (S3 fallback) ───────────────────────────
+uploads/
+media/
+local_storage/
+static_files/
+
+# ── Jupyter / IPython ──────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Editor / IDE ───────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.sw?
+
+# ── OS artefacts ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Type-stubs / mypy ──────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# ── Ruff / linting cache ───────────────────────────────────────
+.ruff_cache/
+
+# ── Docker ─────────────────────────────────────────────────────
+# (Keep Dockerfiles and compose files — only ignore generated volumes)
+docker-volumes/
+
+# ── Secrets & keys ────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/

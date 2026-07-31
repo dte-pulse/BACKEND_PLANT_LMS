@@ -1,0 +1,2 @@
+def paginate():
+    return None

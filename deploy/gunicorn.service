@@ -1,0 +1,19 @@
+[Unit]
+Description=Gunicorn daemon for Plant LMS Backend
+Requires=plant_lms.socket
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/plant-lms/Backend
+Environment="PATH=/var/www/plant-lms/Backend/venv/bin"
+EnvironmentFile=/var/www/plant-lms/Backend/.env
+ExecStart=/var/www/plant-lms/Backend/venv/bin/gunicorn \
+          --workers 4 \
+          --worker-class uvicorn.workers.UvicornWorker \
+          --bind unix:/run/plant_lms.sock \
+          app.main:app
+
+[Install]
+WantedBy=multi-user.target
