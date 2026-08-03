@@ -21,9 +21,11 @@ class EmbeddingClient:
     def embed_text(self, text: str) -> list[float]:
         if self._use_real and self._client:
             try:
+                from google.genai import types
                 result = self._client.models.embed_content(
                     model="gemini-embedding-2",
                     contents=text[:8000],  # API limit guard
+                    config=types.EmbedContentConfig(output_dimensionality=768),
                 )
                 return result.embeddings[0].values
             except Exception as e:

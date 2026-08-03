@@ -76,8 +76,10 @@ class IngestionService:
                 if presigned:
                     download_url = presigned
 
-            pages = self.extraction_service.extract(download_url, document.file_type)
-            chunk_result = self.chunking_service.split_pages(pages)
+            extracted = self.extraction_service.extract(download_url, document.file_type)
+            pages = extracted['pages']
+            toc = extracted['toc']
+            chunk_result = self.chunking_service.split_pages(pages, toc=toc)
 
             # Validate that extraction produced usable content
             if not chunk_result.get('parents'):
@@ -86,6 +88,7 @@ class IngestionService:
                 raise ValueError(failure_msg)
 
         except Exception as e:
+            self.db.rollback()
             if document.status != 'failed_extraction':
                 self.document_repository.update(document, status='failed_extraction', failure_reason=str(e))
             raise e
@@ -148,6 +151,7 @@ class IngestionService:
                 chunk_snapshots.append({'id': c.id, 'content': c.content})
 
         except Exception as e:
+            self.db.rollback()
             self.document_repository.update(document, status='failed_embedding', failure_reason=str(e))
             raise e
 
@@ -193,6 +197,7 @@ class IngestionService:
             self.document_repository.update(document, status='ready', summary=summary, mind_map_json=mind_map_tree)
 
         except Exception as e:
+            self.db.rollback()
             self.document_repository.update(document, status='failed_mcq', failure_reason=str(e))
             raise e
 

@@ -1,4 +1,5 @@
-from sqlalchemy import ForeignKey, Integer, JSON, Text
+from sqlalchemy import ForeignKey, Integer, Text
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -14,7 +15,7 @@ class ParentChunk(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     page_start: Mapped[int] = mapped_column(Integer, default=1)
     page_end: Mapped[int] = mapped_column(Integer, default=1)
     token_count: Mapped[int] = mapped_column(Integer, default=0)

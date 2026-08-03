@@ -1,5 +1,6 @@
-from sqlalchemy import ForeignKey, Integer, JSON, Text, String
+from sqlalchemy import ForeignKey, Integer, Text, String
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 from app.db.session import Base
 
@@ -16,7 +17,7 @@ class Chunk(Base):
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     learning_card: Mapped[str | None] = mapped_column(Text, nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     
     parent_chunk_id: Mapped[int | None] = mapped_column(ForeignKey('parent_chunks.id'), nullable=True, index=True)
     child_index: Mapped[int] = mapped_column(Integer, default=0)

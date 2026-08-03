@@ -141,7 +141,7 @@ def _enhance_markdown(text: str) -> str:
 
 
 class ExtractionService:
-    def extract(self, file_path: str, file_type: str) -> list[dict]:
+    def extract(self, file_path: str, file_type: str) -> dict:
         local_path = file_path
         temp_file = None
 
@@ -179,7 +179,7 @@ class ExtractionService:
             if file_type == 'pdf':
                 return self._extract_pdf(local_path)
             if file_type == 'docx':
-                return self._extract_docx(local_path)
+                return {'pages': self._extract_docx(local_path), 'toc': []}
             raise ValueError('Unsupported file type')
         finally:
             if temp_file:
@@ -188,7 +188,16 @@ class ExtractionService:
                 except Exception as e:
                     logger.error(f"Failed to delete temp file {temp_file.name}: {e}")
 
-    def _extract_pdf(self, file_path: str) -> list[dict]:
+    def _extract_pdf(self, file_path: str) -> dict:
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            toc = doc.get_toc()
+            doc.close()
+        except Exception as e:
+            logger.warning(f"Failed to read PDF TOC outline: {e}")
+            toc = []
+
         try:
             import pymupdf4llm
             md_pages = pymupdf4llm.to_markdown(file_path, page_chunks=True)
@@ -198,7 +207,7 @@ class ExtractionService:
                 if text:
                     enhanced = _enhance_markdown(text)
                     pages.append({'page_no': idx, 'text': enhanced, 'format': 'markdown'})
-            return pages
+            return {'pages': pages, 'toc': toc}
         except Exception as e:
             logger.warning(f"pymupdf4llm unavailable ({e}), falling back to standard fitz extraction")
             import fitz
@@ -209,7 +218,8 @@ class ExtractionService:
                 if text:
                     enhanced = _enhance_markdown(text)
                     pages.append({'page_no': idx, 'text': enhanced, 'format': 'plain'})
-            return pages
+            doc.close()
+            return {'pages': pages, 'toc': toc}
 
     def _extract_docx(self, file_path: str) -> list[dict]:
         try:

@@ -5,9 +5,10 @@ import json
 import logging
 import random
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.models.chunk import Chunk
+from app.models.parent_chunk import ParentChunk
 from app.models.mcq import MCQBank
 from app.models.user_progress import UserProgress
 from app.services.rag_service import RagService
@@ -26,8 +27,6 @@ class LearningSessionService:
     # ── Parent-Child aware methods (Phase 4) ────────────────────────────────
 
     def get_document_structure(self, document_id: int) -> dict:
-        from app.models.parent_chunk import ParentChunk
-        from sqlalchemy.orm import defer
         try:
             from app.models.parent_chunk_progress import ParentChunkProgress
         except ImportError:

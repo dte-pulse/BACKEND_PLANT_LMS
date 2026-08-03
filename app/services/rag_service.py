@@ -6,6 +6,7 @@ import logging
 import math
 import time
 from sqlalchemy.orm import Session
+from pgvector.sqlalchemy import Vector
 
 from app.clients.embedding_client import EmbeddingClient
 from app.models.chunk import Chunk
@@ -66,22 +67,46 @@ class RagService:
         Hybrid Retrieval combining BM25 Lexical Search & Dense Vector Cosine Similarity
         using Reciprocal Rank Fusion (RRF).
         """
-        chunks: list[Chunk] = (
-            self.db.query(Chunk)
-            .filter(Chunk.document_id == document_id)
-            .order_by(Chunk.chunk_index)
-            .all()
-        )
+
+        # 1. Dense Vector Search — DB-level cosine distance via pgvector
+
+        query_vec = self.embedding_client.embed_text(query)
+        try:
+            from sqlalchemy import cast
+            vector_results = (
+                self.db.query(
+                    Chunk,
+                    Chunk.embedding.cosine_distance(cast(query_vec, Vector(768))).label("cos_dist"),
+                )
+                .filter(Chunk.document_id == document_id)
+                .order_by("cos_dist")
+                .limit(top_k * 10)  # Fetch a broader candidate pool for RRF
+                .all()
+            )
+        except Exception as e:
+            logger.warning(f"pgvector query failed, falling back to Python cosine: {e}")
+            all_chunks: list[Chunk] = (
+                self.db.query(Chunk)
+                .filter(Chunk.document_id == document_id)
+                .order_by(Chunk.chunk_index)
+                .all()
+            )
+            vector_results = [
+                (chunk, 1.0 - (_cosine_similarity(query_vec, chunk.embedding) if chunk.embedding else 0.0))
+                for chunk in all_chunks
+            ]
+            vector_results = [(chunk, dist) for chunk, dist in sorted(vector_results, key=lambda x: x[1])]
+            vector_results = [(chunk, dist) for chunk, dist in vector_results]
+            # Reformat to (Chunk, cos_dist) tuples
+            vector_results = [(row[0], row[1]) for row in vector_results]
+
+        # Convert to (similarity_score, chunk) — cosine_distance = 1 - cosine_similarity
+        chunks = [chunk for chunk, _ in vector_results]
+        vector_scored = [(1.0 - dist, chunk) for chunk, dist in vector_results]
+        vector_scored.sort(key=lambda t: t[0], reverse=True)
+
         if not chunks:
             return []
-
-        # 1. Dense Vector Search Ranking
-        query_vec = self.embedding_client.embed_text(query)
-        vector_scored = []
-        for chunk in chunks:
-            sim = _cosine_similarity(query_vec, chunk.embedding) if chunk.embedding else 0.0
-            vector_scored.append((sim, chunk))
-        vector_scored.sort(key=lambda t: t[0], reverse=True)
 
         # 2. BM25 Lexical Keyword Ranking
         tokenized_corpus = [chunk.content.lower().split() for chunk in chunks]
