@@ -173,6 +173,26 @@ class MindMapService:
             for a in attempts:
                 attempts_by_child.setdefault(a.child_chunk_id, []).append(a)
 
+        # Query previous version to perform structural mind map diffing
+        prev_doc = self.db.query(Document).filter(
+            Document.code == document.code,
+            Document.id != document.id
+        ).order_by(Document.version.desc()).first()
+
+        prev_parents_map = {}
+        prev_children_map = {}
+        prev_children = []
+        if prev_doc:
+            prev_parents = self.db.query(ParentChunk).options(defer(ParentChunk.embedding)).filter(
+                ParentChunk.document_id == prev_doc.id
+            ).all()
+            prev_parents_map = {p.stable_id: p for p in prev_parents if p.stable_id}
+
+            prev_children = self.db.query(Chunk).options(defer(Chunk.embedding)).filter(
+                Chunk.document_id == prev_doc.id
+            ).all()
+            prev_children_map = {c.stable_id: c for c in prev_children if c.stable_id}
+
         nodes = []
         completed_parents_count = 0
         total_parents = len(parent_chunks)
@@ -221,10 +241,23 @@ class MindMapService:
 
                 clean_child_title = _clean_node_title(child.content or "")
 
+                # Determine child node version diff status
+                c_stable_id = child.stable_id
+                prev_c = prev_children_map.get(c_stable_id) if c_stable_id else None
+                if prev_c:
+                    if prev_c.content_hash != child.content_hash:
+                        child_ver_status = 'modified'
+                    else:
+                        child_ver_status = 'unchanged'
+                else:
+                    child_ver_status = 'new'
+
                 children_nodes.append({
                     'id': f'child_{child.id}',
+                    'node_id': child.stable_id or f'child_{child.id}',
                     'type': 'child',
                     'chunk_id': child.id,
+                    'stable_id': child.stable_id,
                     'child_index': child.child_index,
                     'title': clean_child_title,
                     'page_no': child.page_no,
@@ -232,6 +265,7 @@ class MindMapService:
                     'knowledge_score': knowledge_score,
                     'attempt_count': attempt_count,
                     'is_passed': is_passed,
+                    'version_status': child_ver_status,
                 })
                 
             # Determine parent status
@@ -261,9 +295,22 @@ class MindMapService:
 
             clean_parent_title = _clean_node_title(parent.title or f'Section {parent.section_index}')
 
+            # Determine parent node version diff status
+            p_stable_id = parent.stable_id
+            prev_p = prev_parents_map.get(p_stable_id) if p_stable_id else None
+            if prev_p:
+                if prev_p.content_hash != parent.content_hash:
+                    parent_ver_status = 'modified'
+                else:
+                    parent_ver_status = 'unchanged'
+            else:
+                parent_ver_status = 'new'
+
             nodes.append({
                 'id': f'parent_{parent.id}',
+                'node_id': parent.stable_id or f'parent_{parent.id}',
                 'type': 'parent',
+                'stable_id': parent.stable_id,
                 'section_index': parent.section_index,
                 'title': clean_parent_title,
                 'summary': parent.summary or '',
@@ -274,7 +321,51 @@ class MindMapService:
                 'children_total': children_total,
                 'children_completed': children_completed,
                 'children': children_nodes,
+                'version_status': parent_ver_status,
             })
+
+        # 5. Handle removed nodes from previous version
+        if prev_doc:
+            current_parent_stable_ids = {p.stable_id for p in parent_chunks if p.stable_id}
+            removed_parents = [p for p in prev_parents_map.values() if p.stable_id not in current_parent_stable_ids]
+            
+            for p in removed_parents:
+                removed_children = [c for c in prev_children if c.parent_chunk_id == p.id]
+                removed_children_nodes = []
+                for c in removed_children:
+                    removed_children_nodes.append({
+                        'id': f'child_removed_{c.id}',
+                        'node_id': c.stable_id or f'child_{c.id}',
+                        'type': 'child',
+                        'chunk_id': c.id,
+                        'stable_id': c.stable_id,
+                        'child_index': c.child_index,
+                        'title': f"[Removed] {_clean_node_title(c.content or '')}",
+                        'page_no': c.page_no,
+                        'status': 'locked',
+                        'knowledge_score': 0.0,
+                        'attempt_count': 0,
+                        'is_passed': False,
+                        'version_status': 'removed',
+                    })
+                
+                nodes.append({
+                    'id': f'parent_removed_{p.id}',
+                    'node_id': p.stable_id or f'parent_{p.id}',
+                    'type': 'parent',
+                    'stable_id': p.stable_id,
+                    'section_index': p.section_index,
+                    'title': f"[Removed] {_clean_node_title(p.title or f'Section {p.section_index}')}",
+                    'summary': p.summary or '',
+                    'page_start': p.page_start,
+                    'page_end': p.page_end,
+                    'status': 'locked',
+                    'knowledge_score': 0.0,
+                    'children_total': len(removed_children),
+                    'children_completed': 0,
+                    'children': removed_children_nodes,
+                    'version_status': 'removed',
+                })
 
         overall_progress_pct = (completed_parents_count / total_parents * 100) if total_parents > 0 else 0.0
         # Average over all parents that have any score data
@@ -291,3 +382,4 @@ class MindMapService:
             'concept_tree': document.mind_map_json or [],
             'nodes': nodes,
         }
+

@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import ForeignKey, Integer, Text, String
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,3 +19,6 @@ class ParentChunk(Base):
     page_start: Mapped[int] = mapped_column(Integer, default=1)
     page_end: Mapped[int] = mapped_column(Integer, default=1)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
+    stable_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+

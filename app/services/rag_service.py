@@ -61,12 +61,24 @@ class RagService:
         self.embedding_client = EmbeddingClient()
 
     def retrieve_chunks_hybrid(
-        self, document_id: int, query: str, top_k: int = 3, rrf_k: int = 60
+        self, document_id: int, query: str, top_k: int = 3, rrf_k: int = 60, historical: bool = False
     ) -> list[tuple[float, "Chunk"]]:
         """
         Hybrid Retrieval combining BM25 Lexical Search & Dense Vector Cosine Similarity
         using Reciprocal Rank Fusion (RRF).
         """
+        # Resolve target document ID based on whether we want historical or latest
+        from app.models.document import Document
+        target_doc_id = document_id
+        if not historical:
+            doc = self.db.query(Document).filter(Document.id == document_id).first()
+            if doc:
+                latest_doc = self.db.query(Document).filter(
+                    Document.code == doc.code,
+                    Document.is_latest == True
+                ).first()
+                if latest_doc:
+                    target_doc_id = latest_doc.id
 
         # 1. Dense Vector Search — DB-level cosine distance via pgvector
 
@@ -78,7 +90,7 @@ class RagService:
                     Chunk,
                     Chunk.embedding.cosine_distance(cast(query_vec, Vector(768))).label("cos_dist"),
                 )
-                .filter(Chunk.document_id == document_id)
+                .filter(Chunk.document_id == target_doc_id)
                 .order_by("cos_dist")
                 .limit(top_k * 10)  # Fetch a broader candidate pool for RRF
                 .all()
@@ -87,7 +99,7 @@ class RagService:
             logger.warning(f"pgvector query failed, falling back to Python cosine: {e}")
             all_chunks: list[Chunk] = (
                 self.db.query(Chunk)
-                .filter(Chunk.document_id == document_id)
+                .filter(Chunk.document_id == target_doc_id)
                 .order_by(Chunk.chunk_index)
                 .all()
             )
@@ -101,8 +113,8 @@ class RagService:
             vector_results = [(row[0], row[1]) for row in vector_results]
 
         # Convert to (similarity_score, chunk) — cosine_distance = 1 - cosine_similarity
-        chunks = [chunk for chunk, _ in vector_results]
-        vector_scored = [(1.0 - dist, chunk) for chunk, dist in vector_results]
+        chunks = [chunk for chunk, dist in vector_results if dist is not None]
+        vector_scored = [(1.0 - dist, chunk) for chunk, dist in vector_results if dist is not None]
         vector_scored.sort(key=lambda t: t[0], reverse=True)
 
         if not chunks:
@@ -146,23 +158,24 @@ class RagService:
         return [(v_score, chunk) for rrf_s, chunk, v_score in hybrid_ranked[:top_k]]
 
     def retrieve_chunks_scored(
-        self, document_id: int, query: str, top_k: int = 3
+        self, document_id: int, query: str, top_k: int = 3, historical: bool = False
     ) -> list[tuple[float, "Chunk"]]:
-        return self.retrieve_chunks_hybrid(document_id, query, top_k)
+        return self.retrieve_chunks_hybrid(document_id, query, top_k, historical=historical)
 
-    def retrieve_chunks(self, document_id: int, query: str, top_k: int = 3) -> list["Chunk"]:
+    def retrieve_chunks(self, document_id: int, query: str, top_k: int = 3, historical: bool = False) -> list["Chunk"]:
         """Return the top_k most relevant chunks using Hybrid RAG (BM25 + Vector + RRF)."""
-        scored = self.retrieve_chunks_scored(document_id, query, top_k)
+        scored = self.retrieve_chunks_scored(document_id, query, top_k, historical=historical)
         if not scored:
             return []
         return [chunk for score, chunk in scored if score >= RELEVANCE_THRESHOLD]
 
     def is_query_in_scope(
-        self, document_id: int, query: str, top_k: int = 3
+        self, document_id: int, query: str, top_k: int = 3, historical: bool = False
     ) -> tuple[bool, list["Chunk"]]:
         """Check whether a query is in scope for the document using Hybrid RAG."""
-        scored = self.retrieve_chunks_scored(document_id, query, top_k)
+        scored = self.retrieve_chunks_scored(document_id, query, top_k, historical=historical)
         if not scored:
+
             return False, []
         best_score = scored[0][0]
         if best_score < RELEVANCE_THRESHOLD:
@@ -176,6 +189,7 @@ class RagService:
     def generate_answer(self, query: str, context_chunks: list["Chunk"], cache_hit: bool = False) -> str:
         """Use Gemini to synthesise an answer grounded in the retrieved chunks."""
         from app.core.config import settings
+        from google.genai import types
 
         context_text = "\n\n---\n\n".join(
             f"[Page {c.page_no}, Chunk {c.chunk_index}]\n{c.content}"
@@ -190,8 +204,25 @@ class RagService:
         from google import genai as genai_sdk
         client = genai_sdk.Client(api_key=settings.gemini_api_key)
 
-        prompt = f"""You are an expert pharmaceutical plant SOP & technical training assistant.
-Answer the user's question clearly, thoroughly, and accurately based on the provided document excerpts.
+        # Dynamic temperature and system instruction tuning based on document type
+        temperature = 0.0
+        system_instruction = "You are an expert pharmaceutical plant SOP & technical training assistant."
+
+        if context_chunks:
+            try:
+                from app.models.document import Document
+                doc_id = context_chunks[0].document_id
+                doc = self.db.query(Document).filter(Document.id == doc_id).first()
+                if doc:
+                    is_sop = "sop" in doc.code.lower() or doc.qa_scope == "doc_strict"
+                    if not is_sop:
+                        temperature = 0.3
+                        system_instruction = "You are an encouraging and educational plant training assistant explaining technical concepts."
+            except Exception as e:
+                logger.warning(f"Failed to query document type for RAG tuning: {e}")
+
+        prompt = f"""Answer the user's question clearly, thoroughly, and accurately based ONLY on the provided document excerpts.
+If the answer cannot be determined or inferred from the provided excerpts, state clearly: "I cannot find the answer to this question in the provided document sections." Do NOT attempt to answer using pre-trained general knowledge.
 
 GUIDELINES FOR YOUR ANSWER:
 1. If the user asks for a summary or to "explain each one by one", provide a clear, structured, step-by-step breakdown explaining EVERY topic or concept mentioned in the excerpts individually.
@@ -207,7 +238,14 @@ ANSWER:"""
 
         t0 = time.monotonic()
         try:
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=temperature
+                )
+            )
             answer = response.text.strip()
             latency_ms = int((time.monotonic() - t0) * 1000)
 

@@ -22,3 +22,6 @@ class Chunk(Base):
     parent_chunk_id: Mapped[int | None] = mapped_column(ForeignKey('parent_chunks.id'), nullable=True, index=True)
     child_index: Mapped[int] = mapped_column(Integer, default=0)
     chunk_type: Mapped[str] = mapped_column(String(20), default='child')
+    stable_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+

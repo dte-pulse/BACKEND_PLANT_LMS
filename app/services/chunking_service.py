@@ -4,23 +4,45 @@ from typing import Optional
 class ChunkingService:
     def __init__(
         self,
-        parent_target_words: int = 1500,
-        child_target_words: int = 380,
-        child_overlap_words: int = 40,
+        parent_target_tokens: int = 2000,
+        child_target_tokens: int = 500,
+        child_overlap_tokens: int = 50,
+        max_chunk_tokens: int = 8000,
+        **kwargs
     ):
-        self.parent_target_words = parent_target_words
-        self.child_target_words = child_target_words
-        self.child_overlap_words = child_overlap_words
+        # Handle backward compatibility mappings for parent_target_words etc.
+        # 1 token is approximately 1.33 words for standard English texts
+        if 'parent_target_words' in kwargs:
+            self.parent_target_tokens = int(kwargs['parent_target_words'] * 1.33)
+        else:
+            self.parent_target_tokens = parent_target_tokens
+            
+        if 'child_target_words' in kwargs:
+            self.child_target_tokens = int(kwargs['child_target_words'] * 1.33)
+        else:
+            self.child_target_tokens = child_target_tokens
+            
+        if 'child_overlap_words' in kwargs:
+            self.child_overlap_tokens = int(kwargs['child_overlap_words'] * 1.33)
+        else:
+            self.child_overlap_tokens = child_overlap_tokens
+            
+        self.max_chunk_tokens = max_chunk_tokens
+
+    @staticmethod
+    def count_tokens(text: str) -> int:
+        """Heuristic character-to-token count (1 token ≈ 4 characters)."""
+        return max(1, len(text) // 4)
 
     def split_pages(self, pages: list[dict], toc: list = None) -> dict:
         full_text = '\n'.join(p['text'] for p in pages)
 
-        # Build a word-offset → page_no lookup so we can assign accurate page numbers
-        page_map = []   # list of (cumulative_word_start, page_no)
+        # Build a token-offset → page_no lookup so we can assign accurate page numbers
+        page_map = []   # list of (cumulative_token_start, page_no)
         current_idx = 0
         for p in pages:
             page_map.append((current_idx, p.get('page_no', 1)))
-            current_idx += len(p['text'].split())
+            current_idx += self.count_tokens(p['text'])
 
         parents = None
         if toc:
@@ -33,50 +55,60 @@ class ChunkingService:
         if not parents:
             parents = self._split_by_headings(full_text, page_map)
 
-        # Filter ghost sections (< 30 words) — avoids table-header fragments becoming parents
-        parents = [p for p in parents if len(p['content'].split()) >= 30]
+        # Filter ghost sections (< 40 tokens) — avoids headers/footers becoming parents
+        parents = [p for p in parents if self.count_tokens(p['content']) >= 40]
 
         result = {'parents': []}
         global_chunk_idx = 1
-        global_word_offset = 0   # cumulative word count across all parents (for page tracking)
+        global_token_offset = 0   # cumulative token count across all parents
 
         for p_idx, parent in enumerate(parents, 1):
+            # Prepend preceding section context for parent continuity (Priority 8)
+            content_with_context = parent['content']
+            if p_idx > 1:
+                prev_parent = parents[p_idx - 2]
+                prev_paras = [p for p in prev_parent['content'].split('\n\n') if p.strip()]
+                if prev_paras:
+                    recap = f"[Preceding Section: {prev_parent['title']}]\n... {prev_paras[-1]}\n\n"
+                    content_with_context = recap + parent['content']
+
             parent_dict = {
                 'section_index': p_idx,
                 'title': parent['title'],
-                'content': parent['content'],
+                'content': content_with_context,
                 'page_start': parent['page_start'],
                 'page_end': parent['page_end'],
-                'token_count': len(parent['content'].split()),
+                'token_count': self.count_tokens(content_with_context),
                 'children': []
             }
 
-            children_texts = self._split_into_children(parent['content'], parent['page_start'])
+            children_texts = self._split_into_children(content_with_context, parent['page_start'])
 
-            # Track word offset within this parent so each child gets an accurate page_no
-            child_word_offset = global_word_offset
+            # Track token offset within this parent so each child gets an accurate page_no
+            child_token_offset = global_token_offset
             for c_idx, child_text in enumerate(children_texts, 1):
-                child_page = self._word_offset_to_page(child_word_offset, page_map)
+                child_page = self._word_offset_to_page(child_token_offset, page_map)
                 parent_dict['children'].append({
                     'child_index': c_idx,
                     'page_no': child_page,
                     'chunk_index': global_chunk_idx,
                     'content': child_text,
-                    'token_count': len(child_text.split())
+                    'token_count': self.count_tokens(child_text),
+                    'hierarchy_path': f"{parent['title']}"  # Priority 3
                 })
-                child_word_offset += len(child_text.split())
+                child_token_offset += self.count_tokens(child_text)
                 global_chunk_idx += 1
 
-            global_word_offset += len(parent['content'].split())
+            global_token_offset += self.count_tokens(content_with_context)
             result['parents'].append(parent_dict)
 
         return result
 
-    def _word_offset_to_page(self, word_offset: int, page_map: list) -> int:
-        """Return the page_no for a given cumulative word offset."""
+    def _word_offset_to_page(self, token_offset: int, page_map: list) -> int:
+        """Return the page_no for a given cumulative token offset."""
         found_page = page_map[0][1] if page_map else 1
         for start_idx, p_no in reversed(page_map):
-            if word_offset >= start_idx:
+            if token_offset >= start_idx:
                 found_page = p_no
                 break
         return found_page
@@ -103,31 +135,29 @@ class ChunkingService:
         sections = []
 
         def get_page_no(char_idx: int) -> int:
-            word_idx = len(full_text[:char_idx].split())
+            token_idx = self.count_tokens(full_text[:char_idx])
             found_page = page_map[0][1] if page_map else 1
             for start_idx, p_no in reversed(page_map):
-                if word_idx >= start_idx:
+                if token_idx >= start_idx:
                     found_page = p_no
                     break
             return found_page
 
         if not all_matches:
-            # No markdown headings — split by word count but preserve text structure
+            # No markdown headings — split by token target but preserve paragraph boundaries
             paragraphs = [p for p in full_text.split('\n\n') if p.strip()]
             sections = []
             current_paras = []
-            current_words = 0
+            current_tokens = 0
 
             for para in paragraphs:
-                para_word_count = len(para.split())
-                if current_words + para_word_count > self.parent_target_words and current_paras:
+                para_token_count = self.count_tokens(para)
+                if current_tokens + para_token_count > self.parent_target_tokens and current_paras:
                     chunk_text = '\n\n'.join(current_paras)
-                    # Derive a meaningful title from the first sentence of this section
                     first_sent = current_paras[0].replace('\n', ' ').strip().split('.')[0][:60].strip()
                     title = first_sent if len(first_sent) >= 5 else f'Section {len(sections) + 1}'
-                    pre_offset = sum(len(p.split()) for p in paragraphs[:paragraphs.index(current_paras[0])])
-                    page_start = get_page_no(sum(len(c) + 2 for c in paragraphs[:paragraphs.index(current_paras[0])]))
-                    page_end = get_page_no(sum(len(c) + 2 for c in paragraphs[:paragraphs.index(current_paras[0]) + len(current_paras)]))
+                    page_start = get_page_no(full_text.find(current_paras[0]))
+                    page_end = get_page_no(full_text.find(current_paras[-1]) + len(current_paras[-1]))
                     sections.append({
                         'title': title,
                         'content': chunk_text,
@@ -135,10 +165,10 @@ class ChunkingService:
                         'page_end': page_end
                     })
                     current_paras = [para]
-                    current_words = para_word_count
+                    current_tokens = para_token_count
                 else:
                     current_paras.append(para)
-                    current_words += para_word_count
+                    current_tokens += para_token_count
 
             if current_paras:
                 chunk_text = '\n\n'.join(current_paras)
@@ -152,16 +182,12 @@ class ChunkingService:
                 })
             return sections
 
-        # Adaptive level selection:
-        # Use the most common shallow heading level as the chapter split boundary.
-        # h1 is often just the title page; we want the most common real chapter level.
+        # Adaptive level selection: dominant level repeating >= 2 times
         from collections import Counter
         level_counts = Counter(len(m.group(1)) for m in all_matches if len(m.group(1)) <= 4)
         if not level_counts:
             return []
 
-        # Dominant = shallowest heading level that appears >= 2 times (a repeated chapter heading).
-        # Fall back to the globally shallowest level if nothing repeats.
         dominant = min(
             (lvl for lvl, cnt in level_counts.items() if cnt >= 2),
             default=min(level_counts.keys())
@@ -176,7 +202,7 @@ class ChunkingService:
             end_pos = matches_pass1[i+1].start() if i + 1 < len(matches_pass1) else len(full_text)
             section_content = full_text[start_pos:end_pos].strip()
 
-            # Skip pure TOC/index pages: >60% of lines are markdown table rows
+            # Skip pure TOC/index pages
             content_lines = [l for l in section_content.splitlines() if l.strip()]
             table_lines = sum(1 for l in content_lines if l.strip().startswith('|'))
             if content_lines and table_lines / len(content_lines) > 0.6:
@@ -204,14 +230,25 @@ class ChunkingService:
                     'page_end': get_page_no(matches_pass1[0].start()),
                 })
 
+        # Rebalancing pass: merge adjacent tiny subsections (Priority 4)
+        rebalanced_sections = []
+        min_tokens = self.parent_target_tokens // 4
+        for sec in raw_sections:
+            if rebalanced_sections and self.count_tokens(sec['content']) < min_tokens:
+                rebalanced_sections[-1]['content'] += "\n\n" + sec['content']
+                rebalanced_sections[-1]['page_end'] = max(rebalanced_sections[-1]['page_end'], sec['page_end'])
+                rebalanced_sections[-1]['char_end'] = sec['char_end']
+            else:
+                rebalanced_sections.append(sec)
+        raw_sections = rebalanced_sections
+
         # ── Pass 2: sub-split any oversized section at dominant+1 ─────────────
-        # A section is "oversized" if it exceeds 2× the parent target word count.
         sub_level = dominant + 1
-        max_words = self.parent_target_words * 2
+        max_tokens = self.parent_target_tokens * 2
         final_sections = []
 
         for sec in raw_sections:
-            if len(sec['content'].split()) <= max_words:
+            if self.count_tokens(sec['content']) <= max_tokens:
                 final_sections.append(sec)
                 continue
 
@@ -224,19 +261,19 @@ class ChunkingService:
                 final_sections.append(sec)
                 continue
 
-            # Reject sub-split if any resulting sub-section would be < 80 words
-            sub_word_counts = []
+            # Reject sub-split if any resulting sub-section would be < 80 tokens
+            sub_token_counts = []
             for j, sm in enumerate(sub_matches):
                 sub_end = sub_matches[j+1].start() if j + 1 < len(sub_matches) else len(sec_text)
-                sub_word_counts.append(len(sec_text[sm.start():sub_end].split()))
-            if any(w < 80 for w in sub_word_counts):
+                sub_token_counts.append(self.count_tokens(sec_text[sm.start():sub_end]))
+            if any(t < 80 for t in sub_token_counts):
                 final_sections.append(sec)
                 continue
 
-            # Preamble before first sub-heading (keep under parent title)
+            # Preamble before first sub-heading
             if sub_matches[0].start() > 0:
                 pre = sec_text[:sub_matches[0].start()].strip()
-                if pre and len(pre.split()) >= 30:
+                if pre and self.count_tokens(pre) >= 40:
                     pre_end_abs = sec['char_start'] + sub_matches[0].start()
                     final_sections.append({
                         'title': sec['title'],
@@ -268,81 +305,142 @@ class ChunkingService:
         return final_sections
 
     def _split_into_children(self, section_content: str, page_no: int) -> list[str]:
-        words = section_content.split()
-        if len(words) <= self.child_target_words:
+        section_tokens = self.count_tokens(section_content)
+        if section_tokens <= self.child_target_tokens:
             return [section_content.strip()] if section_content.strip() else []
 
         paragraphs = [p for p in section_content.split('\n\n') if p.strip()]
         chunks = []
         current_paras = []
-        current_word_count = 0
+        current_token_count = 0
+
+        # Protect tables and list structures from splitting (Priority 2)
+        def is_table_or_list(paragraph: str) -> bool:
+            lines = paragraph.strip().splitlines()
+            if not lines:
+                return False
+            if any(line.strip().startswith('|') for line in lines):
+                return True
+            if all(re.match(r'^(\d+\.|\*|-|\u2022)\s+', line.strip()) for line in lines if line.strip()):
+                return True
+            return False
 
         for para in paragraphs:
-            para_words = para.split()
-            para_len = len(para_words)
-            if not para_words:
+            para_len = self.count_tokens(para)
+            if not para.strip():
                 continue
 
-            if current_word_count + para_len >= self.child_target_words and current_paras:
-                chunks.append('\n\n'.join(current_paras))
-                # overlap: keep last paragraph for context
-                current_paras = current_paras[-1:] + [para]
-                current_word_count = len(current_paras[0].split()) + para_len
-            elif para_len >= self.child_target_words:
-                # Large single paragraph — split by sentences (or word fallback if no periods)
+            # Hard ceiling check: force-split oversized blocks to fit API context window (Priority 1)
+            if para_len > self.max_chunk_tokens:
                 if current_paras:
                     chunks.append('\n\n'.join(current_paras))
                     current_paras = []
-                    current_word_count = 0
-                sentences = para.split('. ')
+                    current_token_count = 0
+                
+                # Split words proportionally by token count
+                words = para.split()
+                temp_chunk = []
+                for w in words:
+                    temp_chunk.append(w)
+                    if self.count_tokens(' '.join(temp_chunk)) >= self.child_target_tokens:
+                        chunks.append(' '.join(temp_chunk))
+                        temp_chunk = []
+                if temp_chunk:
+                    chunks.append(' '.join(temp_chunk))
+                continue
+
+            if current_token_count + para_len >= self.child_target_tokens and current_paras:
+                chunks.append('\n\n'.join(current_paras))
+                # Child-level overlap: carry over the last paragraph for context
+                current_paras = current_paras[-1:] + [para]
+                current_token_count = self.count_tokens(current_paras[0]) + para_len
+            elif para_len >= self.child_target_tokens:
+                if current_paras:
+                    chunks.append('\n\n'.join(current_paras))
+                    current_paras = []
+                    current_token_count = 0
+
+                # Protect tables and lists from structural sentence breaks
+                if is_table_or_list(para):
+                    chunks.append(para.strip())
+                    continue
+
+                # Sentence splitter using abbreviation-aware pattern matching (Priority 6)
+                sentences = self._split_into_sentences(para)
                 if len(sentences) <= 1:
-                    for i in range(0, len(para_words), self.child_target_words):
-                        sub_words = para_words[i:i + self.child_target_words]
-                        if sub_words:
-                            chunks.append(' '.join(sub_words))
+                    para_words = para.split()
+                    temp_words = []
+                    for w in para_words:
+                        temp_words.append(w)
+                        if self.count_tokens(' '.join(temp_words)) >= self.child_target_tokens:
+                            chunks.append(' '.join(temp_words))
+                            temp_words = []
+                    if temp_words:
+                        chunks.append(' '.join(temp_words))
                 else:
                     temp_sentences = []
-                    temp_words = 0
-                    for i, sent in enumerate(sentences):
-                        sent_words = sent.split()
-                        if not sent_words:
-                            continue
-                        if i < len(sentences) - 1:
-                            sent = sent.rstrip() + '.'
-                        if temp_words + len(sent_words) >= self.child_target_words and temp_sentences:
+                    temp_tokens = 0
+                    for sent in sentences:
+                        sent_tokens = self.count_tokens(sent)
+                        if temp_tokens + sent_tokens >= self.child_target_tokens and temp_sentences:
                             chunks.append(' '.join(temp_sentences))
                             temp_sentences = [sent]
-                            temp_words = len(sent_words)
+                            temp_tokens = sent_tokens
                         else:
                             temp_sentences.append(sent)
-                            temp_words += len(sent_words)
+                            temp_tokens += sent_tokens
                     if temp_sentences:
                         current_paras = [' '.join(temp_sentences)]
-                        current_word_count = temp_words
+                        current_token_count = temp_tokens
             else:
                 current_paras.append(para)
-                current_word_count += para_len
+                current_token_count += para_len
 
         if current_paras:
             chunks.append('\n\n'.join(current_paras))
 
         return [c.strip() for c in chunks if c.strip()]
 
-    def _extract_heading_title(self, text: str) -> str:
-        first_line = text.strip().split('\n')[0].strip()
-        match = re.match(r'^#{1,3}\s+(.+)$', first_line)
-        return match.group(1).strip() if match else first_line[:80]
+    def _split_into_sentences(self, text: str) -> list[str]:
+        """Sentence splitter that prevents false breaks on decimal numbers and common abbreviations."""
+        abbrev_pattern = r'\b(eg|ie|fig|dr|mr|mrs|ms|dept|sop|vol|no|vs|approx|min|max|temp|std)\.'
+        raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        sentences = []
+        temp_sent = ""
+        
+        for s in raw_sentences:
+            if not s.strip():
+                continue
+            if temp_sent:
+                temp_sent = temp_sent + " " + s
+            else:
+                temp_sent = s
+                
+            # Keep merging sentences if we detect an abbreviation period
+            if re.search(abbrev_pattern, temp_sent, re.IGNORECASE):
+                continue
+            # Keep merging if it ends with a single letter period (initial)
+            if re.search(r'\b[A-Za-z]\.$', temp_sent):
+                continue
+            
+            sentences.append(temp_sent)
+            temp_sent = ""
+            
+        if temp_sent:
+            sentences.append(temp_sent)
+            
+        return [s.strip() for s in sentences if s.strip()]
 
     def _split_by_toc(self, pages: list[dict], toc: list) -> list[dict]:
         total_pages = len(pages)
         if total_pages == 0:
             return []
 
-        # Filter and sort bookmarks (level <= 3 represents major parts, chapters, subsections)
+        # Filter and sort bookmarks (level <= 3 represents major parts/chapters)
         filtered_toc = [item for item in toc if isinstance(item, list) and len(item) >= 3 and item[0] <= 3]
         filtered_toc.sort(key=lambda x: x[2])  # sort by page_no
 
-        # Remove duplicate page entries, keeping the first occurrence (closest to root)
         unique_toc = []
         seen_pages = set()
         for level, title, p_no in filtered_toc:
@@ -361,7 +459,8 @@ class ChunkingService:
             p_end = unique_toc[0][1] - 1
             section_pages = [p for p in pages if p_start <= p.get('page_no', 1) <= p_end]
             pre_text = '\n\n'.join(p['text'] for p in section_pages).strip()
-            if pre_text:
+            # Validate non-trivial content density (Priority 3)
+            if pre_text and self.count_tokens(pre_text) >= 30:
                 sections.append({
                     'title': 'Introduction',
                     'content': pre_text,
@@ -377,7 +476,8 @@ class ChunkingService:
             section_pages = [p for p in pages if p_start <= p.get('page_no', 1) <= p_end]
             section_content = '\n\n'.join(p['text'] for p in section_pages).strip()
 
-            if section_content:
+            # Validate non-trivial content density (Priority 3)
+            if section_content and self.count_tokens(section_content) >= 30:
                 sections.append({
                     'title': title,
                     'content': section_content,

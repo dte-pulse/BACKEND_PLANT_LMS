@@ -69,6 +69,10 @@ def create_event(
 ):
     if current_user.role not in [UserRole.admin, UserRole.hod, UserRole.trainer]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to create events")
+    
+    if payload.trainer_id is None:
+        payload.trainer_id = current_user.id
+        
     return service.create_event(payload)
 
 @router.patch('/events/{event_id}', response_model=CalendarEventRead)

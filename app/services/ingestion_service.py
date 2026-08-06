@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.clients.embedding_client import EmbeddingClient
 from app.clients.llm_client import LLMClient
+from app.models.document import Document
 from app.models.chunk import Chunk
 from app.models.mcq import MCQBank
 from app.models.parent_chunk import ParentChunk
@@ -98,11 +99,68 @@ class IngestionService:
             self.document_repository.update(document, status='embedding')
             all_child_chunks = []  # will hold persisted Chunk ORM objects
 
+            # Find previous version of the document to do section-level diff
+            prev_doc = self.db.query(Document).filter(
+                Document.code == document.code,
+                Document.id != document.id
+            ).order_by(Document.version.desc()).first()
+
+            prev_parents_map = {}
+            prev_children_map = {}
+            if prev_doc:
+                prev_parents = self.db.query(ParentChunk).filter(ParentChunk.document_id == prev_doc.id).all()
+                for p in prev_parents:
+                    if p.stable_id:
+                        prev_parents_map[p.stable_id] = p
+                
+                prev_children = self.db.query(Chunk).filter(Chunk.document_id == prev_doc.id).all()
+                for c in prev_children:
+                    if c.stable_id:
+                        prev_children_map[c.stable_id] = c
+
+            import hashlib
+            import re
+
+            def sanitize_id_part(text: str) -> str:
+                if not text:
+                    return ""
+                text = re.sub(r'[^a-zA-Z0-9\s-]', '', text)
+                text = re.sub(r'[\s-]+', '_', text)
+                return text.strip('_').lower()
+
+            def compute_hash(text: str) -> str:
+                return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+            # Pre-calculate stable_id and content_hash for all parents and children in chunk_result
             for parent_data in chunk_result.get('parents', []):
-                # Create and embed the parent chunk (section-level)
-                parent_embedding = self.embedding_client.embed_text(
-                    parent_data['content'][:8000]
-                )
+                p_title_sanitized = sanitize_id_part(parent_data['title'])
+                if not p_title_sanitized:
+                    p_title_sanitized = f"sec_{parent_data['section_index']}"
+                parent_stable_id = f"{document.code}__{p_title_sanitized}"
+                parent_data['stable_id'] = parent_stable_id
+                parent_data['content_hash'] = compute_hash(parent_data['content'])
+
+                for child_data in parent_data.get('children', []):
+                    child_stable_id = f"{parent_stable_id}__c_{child_data['child_index']:02d}"
+                    child_data['stable_id'] = child_stable_id
+                    child_data['content_hash'] = compute_hash(child_data['content'])
+
+            for parent_data in chunk_result.get('parents', []):
+                parent_stable_id = parent_data['stable_id']
+                p_hash = parent_data['content_hash']
+
+                prev_parent = prev_parents_map.get(parent_stable_id)
+                is_parent_unchanged = prev_parent and prev_parent.content_hash == p_hash
+
+                if is_parent_unchanged:
+                    parent_embedding = prev_parent.embedding
+                    parent_summary = prev_parent.summary
+                else:
+                    parent_embedding = self.embedding_client.embed_text(
+                        parent_data['content'][:8000]
+                    )
+                    parent_summary = None
+
                 parent_obj = ParentChunk(
                     document_id=document.id,
                     topic_id=document.topic_id or 0,
@@ -110,17 +168,36 @@ class IngestionService:
                     section_index=parent_data['section_index'],
                     title=parent_data['title'],
                     content=parent_data['content'],
-                    summary=None,  # will be filled after MCQ gen
+                    summary=parent_summary,
                     embedding=parent_embedding,
                     page_start=parent_data['page_start'],
                     page_end=parent_data['page_end'],
                     token_count=parent_data['token_count'],
+                    stable_id=parent_stable_id,
+                    content_hash=p_hash
                 )
                 self.db.add(parent_obj)
                 self.db.flush()  # get parent_obj.id before creating children
 
                 # Create child chunks under this parent
                 for child_data in parent_data.get('children', []):
+                    child_stable_id = child_data['stable_id']
+                    c_hash = child_data['content_hash']
+
+                    prev_child = prev_children_map.get(child_stable_id)
+                    is_child_unchanged = prev_child and prev_child.content_hash == c_hash
+
+                    if is_child_unchanged:
+                        child_embedding = prev_child.embedding
+                        child_learning_card = prev_child.learning_card
+                    else:
+                        child_embedding = self.embedding_client.embed_text(
+                            child_data['content']
+                        )
+                        child_learning_card = self.llm_client.generate_learning_card(
+                            child_data['content']
+                        )
+
                     child_obj = Chunk(
                         document_id=document.id,
                         topic_id=document.topic_id or 0,
@@ -132,12 +209,10 @@ class IngestionService:
                         page_no=child_data['page_no'],
                         token_count=child_data['token_count'],
                         content=child_data['content'],
-                        learning_card=self.llm_client.generate_learning_card(
-                            child_data['content']
-                        ),
-                        embedding=self.embedding_client.embed_text(
-                            child_data['content']
-                        ),
+                        learning_card=child_learning_card,
+                        embedding=child_embedding,
+                        stable_id=child_stable_id,
+                        content_hash=c_hash
                     )
                     self.db.add(child_obj)
                     all_child_chunks.append(child_obj)
@@ -161,26 +236,55 @@ class IngestionService:
             mcq_rows = []
 
             for i, snap in enumerate(chunk_snapshots):
-                # Try Gemini MCQ generation for every chunk; fallback ensures MCQs are always produced
-                items = self._generate_tiered_mcqs(snap['content'])
-                if not items:
-                    # Guarantee MCQs even when Gemini is unavailable / quota-exceeded
-                    items = self._fallback_mcqs_for_content(snap['content'])
+                child_db_obj = all_child_chunks[i]
+                c_stable_id = child_db_obj.stable_id
+                c_hash = child_db_obj.content_hash
 
-                for item in items:
-                    mcq_rows.append(
-                        MCQBank(
-                            document_id=document.id,
-                            topic_id=document.topic_id or 0,
-                            chunk_id=snap['id'],
-                            question=item['question'],
-                            options=item['options'],
-                            correct_option=item['correct_option'],
-                            explanation=item['explanation'],
-                            difficulty=item['difficulty'],
-                            type=item.get('type', 'objective'),
+                prev_child = prev_children_map.get(c_stable_id)
+                is_child_unchanged = prev_child and prev_child.content_hash == c_hash
+
+                copied_mcqs = False
+                if is_child_unchanged:
+                    # Fetch MCQs from previous child
+                    prev_mcqs = self.db.query(MCQBank).filter(MCQBank.chunk_id == prev_child.id).all()
+                    if prev_mcqs:
+                        for prev_mcq in prev_mcqs:
+                            mcq_rows.append(
+                                MCQBank(
+                                    document_id=document.id,
+                                    topic_id=document.topic_id or 0,
+                                    chunk_id=child_db_obj.id,
+                                    question=prev_mcq.question,
+                                    options=prev_mcq.options,
+                                    correct_option=prev_mcq.correct_option,
+                                    explanation=prev_mcq.explanation,
+                                    difficulty=prev_mcq.difficulty,
+                                    type=prev_mcq.type
+                                )
+                            )
+                        copied_mcqs = True
+
+                if not copied_mcqs:
+                    items = self._generate_tiered_mcqs(snap['content'])
+                    if not items:
+                        # Guarantee MCQs even when Gemini is unavailable / quota-exceeded
+                        items = self._fallback_mcqs_for_content(snap['content'])
+
+                    for item in items:
+                        mcq_rows.append(
+                            MCQBank(
+                                document_id=document.id,
+                                topic_id=document.topic_id or 0,
+                                chunk_id=child_db_obj.id,
+                                question=item['question'],
+                                options=item['options'],
+                                correct_option=item['correct_option'],
+                                explanation=item['explanation'],
+                                difficulty=item['difficulty'],
+                                type=item.get('type', 'objective'),
+                            )
                         )
-                    )
+
 
             if mcq_rows:
                 self.mcq_repository.create_many(mcq_rows)
@@ -189,6 +293,29 @@ class IngestionService:
             summary = self.llm_client.generate_topic_summary(
                 [snap['content'] for snap in chunk_snapshots]
             )
+            
+            # Check versioning and perform comparison if a previous version exists
+            try:
+                prev_doc = self.db.query(Document).filter(
+                    Document.code == document.code,
+                    Document.id != document.id
+                ).order_by(Document.version.desc()).first()
+
+                if prev_doc:
+                    # Retrieve the full text of the previous version from its parents
+                    prev_parents = self.db.query(ParentChunk).filter(
+                        ParentChunk.document_id == prev_doc.id
+                    ).order_by(ParentChunk.section_index).all()
+                    
+                    prev_text = "\n\n".join(p.content for p in prev_parents)
+                    new_text = "\n\n".join(snap['content'] for snap in chunk_snapshots)
+                    
+                    if prev_text.strip():
+                        changelog = self.llm_client.compare_document_versions(prev_text, new_text)
+                        summary = f"{summary}\n\n### Version {document.version} Changelog (Changes from Version {prev_doc.version}):\n{changelog}"
+            except Exception as comp_err:
+                logger.warning(f"Failed to generate revision changelog comparison: {comp_err}")
+
             outline_text = "\n\n".join(
                 f"Section: {p.get('title', '')}\n{p.get('content', '')[:1000]}"
                 for p in chunk_result.get('parents', [])

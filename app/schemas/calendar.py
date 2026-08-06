@@ -5,7 +5,7 @@ class CalendarEventCreate(BaseModel):
     title: str
     description: str | None = None
     topic_id: int | None = None
-    trainer_id: int
+    trainer_id: int | None = None
     start_time: datetime
     end_time: datetime
     location: str | None = None

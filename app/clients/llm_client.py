@@ -171,3 +171,36 @@ Document Outline Text:
             logger.error(f"Failed to generate topic summary: {e}")
             return combined[:500]
 
+    def compare_document_versions(self, prev_text: str, new_text: str, user_id: int = 0) -> str:
+        """Compare the text of two versions of the document and summarize the key differences/revision changelog."""
+        if not self.model:
+            return "No previous version available or mock comparison."
+            
+        prompt = f"""You are a pharmaceutical document control assistant.
+Compare the previous version and the new version of this SOP document.
+Highlight the key changes, including:
+1. Significant additions (new rules, requirements, instructions).
+2. Significant deletions or omissions.
+3. Key procedural updates or changes.
+
+Be highly professional, clear, and output the summary in clean bullet points.
+
+---
+PREVIOUS VERSION TEXT:
+{prev_text[:6000]}
+
+---
+NEW VERSION TEXT:
+{new_text[:6000]}
+"""
+        t0 = time.monotonic()
+        try:
+            response = self._client.models.generate_content(model=self.model, contents=prompt)
+            text = response.text.strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            self._log_tokens(user_id, 'compare_versions', prompt, text, latency_ms)
+            return text
+        except Exception as e:
+            logger.error(f"Failed to compare document versions: {e}")
+            return "Failed to generate revision comparison changelog."
+

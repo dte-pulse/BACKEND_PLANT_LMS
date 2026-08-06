@@ -46,16 +46,26 @@ class DocumentService:
                 topic_id = new_topic.id
                 subject_id = general_subject.id
 
+        # Check versioning: if document with same code exists, increment version
+        existing_doc = db.query(Document).filter(
+            Document.code == payload.code
+        ).order_by(Document.version.desc()).first()
+        
+        version = payload.version
+        if existing_doc:
+            version = existing_doc.version + 1
+
         document = Document(
             code=payload.code,
             title=payload.title,
             topic=payload.topic,
             topic_id=topic_id,
             subject_id=subject_id,
-            version=payload.version,
+            version=version,
             sequence_order=payload.sequence_order,
             status=payload.status,
             qa_scope=payload.qa_scope,
+            is_latest=False,  # default to False until published (atomic flip)
         )
         return self.repository.create(document)
 
@@ -185,6 +195,18 @@ class DocumentService:
         if payload.get('status') == 'active':
             db = self.repository.db
             try:
+                # Archive all previous versions of this document and perform atomic flip of is_latest
+                db.query(Document).filter(
+                    Document.code == updated_doc.code,
+                    Document.id != updated_doc.id
+                ).update({
+                    'status': 'archived',
+                    'is_latest': False
+                }, synchronize_session=False)
+
+                updated_doc.is_latest = True
+                db.add(updated_doc)
+
                 from app.models.training import TrainingAssignment
                 from app.services.notification_service import NotificationService
 
