@@ -1,0 +1,762 @@
+{
+  "generated_at": "2026-08-11T10:31:39.909559Z",
+  "base_url": "http://127.0.0.1:8000/api/v1",
+  "iterations": 3,
+  "concurrency": 5,
+  "include_writes": false,
+  "total_requests": 318,
+  "pages_tested": 24,
+  "endpoints_tested": 40,
+  "slowest_endpoints": [
+    [
+      "GET /reports/overdue",
+      1199.89,
+      0.0
+    ],
+    [
+      "GET /reports/global-readiness",
+      1101.43,
+      0.0
+    ],
+    [
+      "GET /reports/nq-employees",
+      1079.67,
+      0.0
+    ],
+    [
+      "GET /learning/assigned",
+      539.26,
+      0.0
+    ],
+    [
+      "GET /ingestion/status/{doc_id}",
+      521.11,
+      0.0
+    ],
+    [
+      "GET /training/trainer/dashboard",
+      500.05,
+      0.0
+    ],
+    [
+      "GET /qa?document_id={doc_id}",
+      437.99,
+      0.0
+    ],
+    [
+      "GET /reports/token-usage",
+      429.35,
+      0.0
+    ],
+    [
+      "GET /documents",
+      402.61,
+      0.0
+    ],
+    [
+      "GET /subjects",
+      400.2,
+      0.0
+    ]
+  ],
+  "endpoints": {
+    "GET /calendar/events": {
+      "count": 9,
+      "mean_ms": 256.03,
+      "min_ms": 196.89,
+      "max_ms": 322.39,
+      "p50_ms": 251.65,
+      "p95_ms": 322.39,
+      "p99_ms": 322.39,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /calendar/upcoming": {
+      "count": 6,
+      "mean_ms": 266.6,
+      "min_ms": 182.81,
+      "max_ms": 378.73,
+      "p50_ms": 274.26,
+      "p95_ms": 378.73,
+      "p99_ms": 378.73,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /departments": {
+      "count": 6,
+      "mean_ms": 235.23,
+      "min_ms": 207.2,
+      "max_ms": 326.84,
+      "p50_ms": 222.5,
+      "p95_ms": 326.84,
+      "p99_ms": 326.84,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /departments/{dept_id}": {
+      "count": 6,
+      "mean_ms": 164.29,
+      "min_ms": 152.01,
+      "max_ms": 191.53,
+      "p50_ms": 159.86,
+      "p95_ms": 191.53,
+      "p99_ms": 191.53,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /documents": {
+      "count": 24,
+      "mean_ms": 317.77,
+      "min_ms": 177.5,
+      "max_ms": 1104.93,
+      "p50_ms": 268.79,
+      "p95_ms": 402.61,
+      "p99_ms": 1104.93,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 24
+    },
+    "GET /documents/{doc_id}": {
+      "count": 9,
+      "mean_ms": 211.01,
+      "min_ms": 175.41,
+      "max_ms": 271.99,
+      "p50_ms": 194.95,
+      "p95_ms": 271.99,
+      "p99_ms": 271.99,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /documents/{doc_id}/chunks": {
+      "count": 9,
+      "mean_ms": 196.03,
+      "min_ms": 150.62,
+      "max_ms": 293.57,
+      "p50_ms": 174.47,
+      "p95_ms": 293.57,
+      "p99_ms": 293.57,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /documents/{doc_id}/history-summary": {
+      "count": 6,
+      "mean_ms": 181.17,
+      "min_ms": 164.87,
+      "max_ms": 205.81,
+      "p50_ms": 172.93,
+      "p95_ms": 205.81,
+      "p99_ms": 205.81,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /documents/{doc_id}/view-url": {
+      "count": 9,
+      "mean_ms": 180.86,
+      "min_ms": 155.61,
+      "max_ms": 203.44,
+      "p50_ms": 178.19,
+      "p95_ms": 203.44,
+      "p99_ms": 203.44,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /ingestion/status/{doc_id}": {
+      "count": 6,
+      "mean_ms": 446.83,
+      "min_ms": 403.41,
+      "max_ms": 521.11,
+      "p50_ms": 436.95,
+      "p95_ms": 521.11,
+      "p99_ms": 521.11,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /learning/assigned": {
+      "count": 9,
+      "mean_ms": 231.98,
+      "min_ms": 138.18,
+      "max_ms": 539.26,
+      "p50_ms": 167.34,
+      "p95_ms": 539.26,
+      "p99_ms": 539.26,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /learning/paths": {
+      "count": 6,
+      "mean_ms": 222.61,
+      "min_ms": 165.52,
+      "max_ms": 389.3,
+      "p50_ms": 200.09,
+      "p95_ms": 389.3,
+      "p99_ms": 389.3,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /learning/progress/dashboard": {
+      "count": 9,
+      "mean_ms": 195.74,
+      "min_ms": 133.19,
+      "max_ms": 297.24,
+      "p50_ms": 200.49,
+      "p95_ms": 297.24,
+      "p99_ms": 297.24,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /learning/session/child/{chunk_id}/question": {
+      "count": 6,
+      "mean_ms": 195.34,
+      "min_ms": 153.45,
+      "max_ms": 255.89,
+      "p50_ms": 189.59,
+      "p95_ms": 255.89,
+      "p99_ms": 255.89,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /learning/session/document/{doc_id}/mindmap": {
+      "count": 15,
+      "mean_ms": 195.45,
+      "min_ms": 135.26,
+      "max_ms": 264.13,
+      "p50_ms": 190.27,
+      "p95_ms": 264.13,
+      "p99_ms": 264.13,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /learning/session/document/{doc_id}/structure": {
+      "count": 6,
+      "mean_ms": 198.34,
+      "min_ms": 153.6,
+      "max_ms": 234.35,
+      "p50_ms": 209.28,
+      "p95_ms": 234.35,
+      "p99_ms": 234.35,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /learning/training-record": {
+      "count": 6,
+      "mean_ms": 208.94,
+      "min_ms": 149.97,
+      "max_ms": 318.02,
+      "p50_ms": 201.03,
+      "p95_ms": 318.02,
+      "p99_ms": 318.02,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /mcq/document/{doc_id}": {
+      "count": 9,
+      "mean_ms": 199.45,
+      "min_ms": 157.64,
+      "max_ms": 283.6,
+      "p50_ms": 186.03,
+      "p95_ms": 283.6,
+      "p99_ms": 283.6,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /mcq/document/{doc_id}/final-assessment": {
+      "count": 6,
+      "mean_ms": 210.6,
+      "min_ms": 147.16,
+      "max_ms": 289.99,
+      "p50_ms": 230.39,
+      "p95_ms": 289.99,
+      "p99_ms": 289.99,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /notifications": {
+      "count": 6,
+      "mean_ms": 223.82,
+      "min_ms": 178.03,
+      "max_ms": 294.27,
+      "p50_ms": 221.5,
+      "p95_ms": 294.27,
+      "p99_ms": 294.27,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /notifications/unread-count": {
+      "count": 6,
+      "mean_ms": 229.03,
+      "min_ms": 205.3,
+      "max_ms": 282.22,
+      "p50_ms": 223.64,
+      "p95_ms": 282.22,
+      "p99_ms": 282.22,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /qa?document_id={doc_id}": {
+      "count": 6,
+      "mean_ms": 367.13,
+      "min_ms": 327.29,
+      "max_ms": 437.99,
+      "p50_ms": 368.04,
+      "p95_ms": 437.99,
+      "p99_ms": 437.99,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /reports/compliance": {
+      "count": 6,
+      "mean_ms": 197.24,
+      "min_ms": 134.56,
+      "max_ms": 344.35,
+      "p50_ms": 166.25,
+      "p95_ms": 344.35,
+      "p99_ms": 344.35,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /reports/department-compliance/{dept_name}": {
+      "count": 9,
+      "mean_ms": 228.59,
+      "min_ms": 131.78,
+      "max_ms": 371.39,
+      "p50_ms": 236.9,
+      "p95_ms": 371.39,
+      "p99_ms": 371.39,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /reports/global-readiness": {
+      "count": 9,
+      "mean_ms": 296.4,
+      "min_ms": 139.08,
+      "max_ms": 1101.43,
+      "p50_ms": 204.12,
+      "p95_ms": 1101.43,
+      "p99_ms": 1101.43,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /reports/nq-employees": {
+      "count": 9,
+      "mean_ms": 295.27,
+      "min_ms": 134.5,
+      "max_ms": 1079.67,
+      "p50_ms": 204.45,
+      "p95_ms": 1079.67,
+      "p99_ms": 1079.67,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /reports/overdue": {
+      "count": 9,
+      "mean_ms": 298.59,
+      "min_ms": 135.99,
+      "max_ms": 1199.89,
+      "p50_ms": 196.43,
+      "p95_ms": 1199.89,
+      "p99_ms": 1199.89,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /reports/token-usage": {
+      "count": 6,
+      "mean_ms": 231.05,
+      "min_ms": 153.76,
+      "max_ms": 429.35,
+      "p50_ms": 206.84,
+      "p95_ms": 429.35,
+      "p99_ms": 429.35,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /subjects": {
+      "count": 9,
+      "mean_ms": 265.1,
+      "min_ms": 199.54,
+      "max_ms": 400.2,
+      "p50_ms": 244.61,
+      "p95_ms": 400.2,
+      "p99_ms": 400.2,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /topics": {
+      "count": 9,
+      "mean_ms": 259.54,
+      "min_ms": 192.66,
+      "max_ms": 326.0,
+      "p50_ms": 261.74,
+      "p95_ms": 326.0,
+      "p99_ms": 326.0,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /topics/{topic_id}": {
+      "count": 6,
+      "mean_ms": 183.94,
+      "min_ms": 156.88,
+      "max_ms": 229.73,
+      "p50_ms": 186.71,
+      "p95_ms": 229.73,
+      "p99_ms": 229.73,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /training/assignments": {
+      "count": 6,
+      "mean_ms": 259.97,
+      "min_ms": 203.79,
+      "max_ms": 333.85,
+      "p50_ms": 266.12,
+      "p95_ms": 333.85,
+      "p99_ms": 333.85,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /training/assignments/{assignment_id}/evidence": {
+      "count": 6,
+      "mean_ms": 218.53,
+      "min_ms": 133.03,
+      "max_ms": 343.09,
+      "p50_ms": 228.93,
+      "p95_ms": 343.09,
+      "p99_ms": 343.09,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /training/paths": {
+      "count": 6,
+      "mean_ms": 202.18,
+      "min_ms": 151.09,
+      "max_ms": 359.97,
+      "p50_ms": 176.27,
+      "p95_ms": 359.97,
+      "p99_ms": 359.97,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /training/trainer/assignments": {
+      "count": 6,
+      "mean_ms": 229.5,
+      "min_ms": 203.89,
+      "max_ms": 258.9,
+      "p50_ms": 234.09,
+      "p95_ms": 258.9,
+      "p99_ms": 258.9,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /training/trainer/dashboard": {
+      "count": 6,
+      "mean_ms": 374.43,
+      "min_ms": 295.28,
+      "max_ms": 500.05,
+      "p50_ms": 397.97,
+      "p95_ms": 500.05,
+      "p99_ms": 500.05,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 6
+    },
+    "GET /users": {
+      "count": 9,
+      "mean_ms": 286.73,
+      "min_ms": 210.19,
+      "max_ms": 361.97,
+      "p50_ms": 302.39,
+      "p95_ms": 361.97,
+      "p99_ms": 361.97,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 9
+    },
+    "GET /users/me": {
+      "count": 15,
+      "mean_ms": 198.01,
+      "min_ms": 131.85,
+      "max_ms": 310.5,
+      "p50_ms": 194.78,
+      "p95_ms": 310.5,
+      "p99_ms": 310.5,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 15
+    },
+    "GET /users/{user_id}": {
+      "count": 6,
+      "mean_ms": 195.65,
+      "min_ms": 150.03,
+      "max_ms": 220.64,
+      "p50_ms": 214.52,
+      "p95_ms": 220.64,
+      "p99_ms": 220.64,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    },
+    "GET /users/{user_id}/progress": {
+      "count": 6,
+      "mean_ms": 187.0,
+      "min_ms": 157.83,
+      "max_ms": 214.5,
+      "p50_ms": 184.88,
+      "p95_ms": 214.5,
+      "p99_ms": 214.5,
+      "errors": 0,
+      "error_rate": 0.0,
+      "http_2xx": 0
+    }
+  },
+  "pages": {
+    "admin/DashboardPage": {
+      "count": 18,
+      "mean_ms": 351.25,
+      "min_ms": 139.08,
+      "max_ms": 1199.89,
+      "p50_ms": 204.45,
+      "p95_ms": 1199.89,
+      "p99_ms": 1199.89
+    },
+    "admin/DocumentsPage": {
+      "count": 42,
+      "mean_ms": 251.11,
+      "min_ms": 150.62,
+      "max_ms": 1104.93,
+      "p50_ms": 224.58,
+      "p95_ms": 360.8,
+      "p99_ms": 1104.93
+    },
+    "admin/MasterDataPage": {
+      "count": 24,
+      "mean_ms": 200.5,
+      "min_ms": 152.01,
+      "max_ms": 326.84,
+      "p50_ms": 199.54,
+      "p95_ms": 285.19,
+      "p99_ms": 326.84
+    },
+    "admin/NotificationsPage": {
+      "count": 12,
+      "mean_ms": 226.43,
+      "min_ms": 178.03,
+      "max_ms": 294.27,
+      "p50_ms": 221.5,
+      "p95_ms": 294.27,
+      "p99_ms": 294.27
+    },
+    "admin/ReportsPage": {
+      "count": 21,
+      "mean_ms": 202.84,
+      "min_ms": 134.5,
+      "max_ms": 429.35,
+      "p50_ms": 183.62,
+      "p95_ms": 344.35,
+      "p99_ms": 429.35
+    },
+    "admin/TrainingPage": {
+      "count": 15,
+      "mean_ms": 282.41,
+      "min_ms": 203.79,
+      "max_ms": 361.97,
+      "p50_ms": 275.44,
+      "p95_ms": 361.97,
+      "p99_ms": 361.97
+    },
+    "admin/UsersPage": {
+      "count": 15,
+      "mean_ms": 211.78,
+      "min_ms": 150.03,
+      "max_ms": 307.54,
+      "p50_ms": 210.7,
+      "p95_ms": 307.54,
+      "p99_ms": 307.54
+    },
+    "auth/LoginPage": {
+      "count": 6,
+      "mean_ms": 195.82,
+      "min_ms": 132.56,
+      "max_ms": 280.19,
+      "p50_ms": 206.21,
+      "p95_ms": 280.19,
+      "p99_ms": 280.19
+    },
+    "hod/CalendarPage": {
+      "count": 12,
+      "mean_ms": 264.74,
+      "min_ms": 182.81,
+      "max_ms": 378.73,
+      "p50_ms": 269.08,
+      "p95_ms": 378.73,
+      "p99_ms": 378.73
+    },
+    "hod/HodDashboardPage": {
+      "count": 9,
+      "mean_ms": 209.21,
+      "min_ms": 131.78,
+      "max_ms": 371.39,
+      "p50_ms": 194.66,
+      "p95_ms": 371.39,
+      "p99_ms": 371.39
+    },
+    "hod/QualificationPage": {
+      "count": 12,
+      "mean_ms": 227.4,
+      "min_ms": 131.85,
+      "max_ms": 402.61,
+      "p50_ms": 228.93,
+      "p95_ms": 402.61,
+      "p99_ms": 402.61
+    },
+    "hod/ReportsPage": {
+      "count": 6,
+      "mean_ms": 233.41,
+      "min_ms": 147.33,
+      "max_ms": 310.5,
+      "p50_ms": 241.89,
+      "p95_ms": 310.5,
+      "p99_ms": 310.5
+    },
+    "trainee/AssessmentsPage": {
+      "count": 30,
+      "mean_ms": 227.57,
+      "min_ms": 138.18,
+      "max_ms": 539.26,
+      "p50_ms": 216.53,
+      "p95_ms": 382.98,
+      "p99_ms": 539.26
+    },
+    "trainee/LearnSessionPage": {
+      "count": 18,
+      "mean_ms": 198.79,
+      "min_ms": 153.45,
+      "max_ms": 255.89,
+      "p50_ms": 190.27,
+      "p95_ms": 255.89,
+      "p99_ms": 255.89
+    },
+    "trainee/MindMapPage": {
+      "count": 3,
+      "mean_ms": 183.2,
+      "min_ms": 146.44,
+      "max_ms": 218.52,
+      "p50_ms": 184.64,
+      "p95_ms": 218.52,
+      "p99_ms": 218.52
+    },
+    "trainee/ProgressPage": {
+      "count": 12,
+      "mean_ms": 208.67,
+      "min_ms": 142.39,
+      "max_ms": 318.02,
+      "p50_ms": 201.03,
+      "p95_ms": 318.02,
+      "p99_ms": 318.02
+    },
+    "trainee/QaPage": {
+      "count": 12,
+      "mean_ms": 273.71,
+      "min_ms": 135.26,
+      "max_ms": 437.99,
+      "p50_ms": 327.29,
+      "p95_ms": 437.99,
+      "p99_ms": 437.99
+    },
+    "trainee/TraineeDashboardPage": {
+      "count": 3,
+      "mean_ms": 170.42,
+      "min_ms": 133.19,
+      "max_ms": 201.23,
+      "p50_ms": 176.85,
+      "p95_ms": 201.23,
+      "p99_ms": 201.23
+    },
+    "trainee/TraineePathsPage": {
+      "count": 6,
+      "mean_ms": 222.61,
+      "min_ms": 165.52,
+      "max_ms": 389.3,
+      "p50_ms": 200.09,
+      "p95_ms": 389.3,
+      "p99_ms": 389.3
+    },
+    "trainer/AssessmentsPage": {
+      "count": 6,
+      "mean_ms": 221.88,
+      "min_ms": 172.25,
+      "max_ms": 286.56,
+      "p50_ms": 241.08,
+      "p95_ms": 286.56,
+      "p99_ms": 286.56
+    },
+    "trainer/AttendancePage": {
+      "count": 3,
+      "mean_ms": 242.35,
+      "min_ms": 231.59,
+      "max_ms": 251.65,
+      "p50_ms": 243.81,
+      "p95_ms": 251.65,
+      "p99_ms": 251.65
+    },
+    "trainer/MaterialsPage": {
+      "count": 12,
+      "mean_ms": 333.61,
+      "min_ms": 183.9,
+      "max_ms": 521.11,
+      "p50_ms": 403.41,
+      "p95_ms": 521.11,
+      "p99_ms": 521.11
+    },
+    "trainer/TrainerDashboardPage": {
+      "count": 12,
+      "mean_ms": 301.96,
+      "min_ms": 203.89,
+      "max_ms": 500.05,
+      "p50_ms": 295.28,
+      "p95_ms": 500.05,
+      "p99_ms": 500.05
+    },
+    "trainer/TrainingPathsPage": {
+      "count": 9,
+      "mean_ms": 222.94,
+      "min_ms": 151.09,
+      "max_ms": 359.97,
+      "p50_ms": 197.77,
+      "p95_ms": 359.97,
+      "p99_ms": 359.97
+    }
+  }
+}

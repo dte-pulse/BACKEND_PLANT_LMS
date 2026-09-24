@@ -34,6 +34,7 @@ from app.models.user_mcq_attempt import UserMcqAttempt
 from app.models.user_progress import UserProgress
 from app.models.user_qa_session import UserQaSession
 from app.models.user_weakness_profile import UserWeaknessProfile
+from app.models.user_concept_mastery import UserConceptMastery
 
 __all__ = [
     'User', 'UserRole',
@@ -46,7 +47,7 @@ __all__ = [
     'Trainer',
     'TrainingAssignment',
     'TrainingEvidence',
-    'UserProgress', 'UserMcqAttempt', 'UserQaSession', 'UserWeaknessProfile',
+    'UserProgress', 'UserMcqAttempt', 'UserQaSession', 'UserWeaknessProfile', 'UserConceptMastery',
     'Notification',
     'CalendarEvent', 'Attendance',
     'TokenUsageLog',

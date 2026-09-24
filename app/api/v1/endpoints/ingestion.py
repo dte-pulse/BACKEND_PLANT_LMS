@@ -7,7 +7,7 @@ from app.schemas.document import DocumentCreate
 from app.schemas.ingestion import IngestionStatusResponse, UploadDocumentResponse
 from app.services.document_service import DocumentService
 from app.services.ingestion_service import IngestionService
-from app.storage.file_storage import FileStorageService
+from app.storage.file_storage import FileStorageService, UploadValidationError
 from app.tasks.document_tasks import process_document
 
 router = APIRouter(prefix='/ingestion', tags=['ingestion'])
@@ -30,9 +30,13 @@ def upload_document(
         raise HTTPException(status_code=400, detail='Only PDF and DOCX files are supported')
 
     from sqlalchemy.exc import IntegrityError
-    
-    storage = FileStorageService()
-    stored_name, file_type, file_url = storage.save_upload(file)
+
+    # VULN-007: enforce size + real-content validation before anything is stored.
+    try:
+        storage = FileStorageService()
+        stored_name, file_type, file_url = storage.save_upload(file)
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     try:
         document = document_service.create_document(
         DocumentCreate(
@@ -67,7 +71,10 @@ def upload_document(
 
 
 @router.post('/process/{document_id}', response_model=IngestionStatusResponse)
-def process_uploaded_document(document_id: int, ingestion_service: IngestionService = Depends(get_ingestion_service)):
+def process_uploaded_document(
+    document_id: int,
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+):
     try:
         return ingestion_service.process_document(document_id)
     except ValueError as exc:
@@ -75,8 +82,14 @@ def process_uploaded_document(document_id: int, ingestion_service: IngestionServ
 
 
 @router.get('/status/{document_id}', response_model=IngestionStatusResponse)
-def get_ingestion_status(document_id: int, ingestion_service: IngestionService = Depends(get_ingestion_service)):
+def get_ingestion_status(
+    document_id: int,
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+):
+    # I-7: surface stale jobs as failures when the status endpoint is polled, so
+    # the admin UI never shows a document stuck in 'embedding' forever.
     try:
+        ingestion_service.recover_stale_ingestions()
         return ingestion_service.get_status(document_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

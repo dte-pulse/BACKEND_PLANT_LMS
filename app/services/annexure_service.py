@@ -67,9 +67,12 @@ class AnnexureService:
             TrainingAssignment.user_id == user_id,
             TrainingAssignment.training_type == 'induction',
         ).all()
+        # N+1 fix: batch-fetch documents once.
+        doc_ids = {a.document_id for a in assignments if a.document_id}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
         rows = ''
         for i, a in enumerate(assignments, 1):
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
+            doc = docs.get(a.document_id)
             rows += f'<tr><td>{i}</td><td>{doc.code if doc else "—"}</td><td>{doc.title if doc else "—"}</td><td>{a.status.upper()}</td><td>&nbsp;</td></tr>'
         html = self._header('Annexure-I: Induction Training Schedule')
         html += f"""
@@ -95,9 +98,12 @@ class AnnexureService:
             UserMcqAttempt.user_id == user_id
         ).order_by(UserMcqAttempt.id.desc()).limit(10).all()
 
+        # N+1 fix: batch-fetch documents once.
+        doc_ids = {a.document_id for a in attempts if a.document_id}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
         rows = ''
         for a in attempts:
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
+            doc = docs.get(a.document_id)
             rows += f'<tr><td>{doc.code if doc else "—"}</td><td>{doc.title if doc else "—"}</td><td>{a.score:.1f}%</td><td>{"PASS" if a.passed else "FAIL"}</td></tr>'
 
         html = self._header('Annexure-II: Induction Training Evaluation')
@@ -143,10 +149,15 @@ class AnnexureService:
         if not event:
             raise ValueError(f'Calendar event {event_id} not found')
         records = self.db.query(Attendance).filter(Attendance.event_id == event_id).all()
+        # N+1 fix: batch-fetch users once.
+        # Note: intentionally tolerant of deleted users — renders "—" instead of
+        # raising (previous _get_user() call raised 404 for orphaned rows).
+        user_ids = {r.user_id for r in records if r.user_id}
+        users = {u.id: u for u in self.db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
         rows = ''
         for i, r in enumerate(records, 1):
-            user = self._get_user(r.user_id)
-            rows += f'<tr><td>{i}</td><td>{user.employee_code}</td><td>{user.full_name}</td><td>{user.department or "—"}</td><td>{"✓" if r.attended else "✗"}</td><td>&nbsp;</td></tr>'
+            user = users.get(r.user_id)
+            rows += f'<tr><td>{i}</td><td>{user.employee_code if user else "—"}</td><td>{user.full_name if user else "—"}</td><td>{user.department or "—" if user else "—"}</td><td>{"✓" if r.attended else "✗"}</td><td>&nbsp;</td></tr>'
 
         html = self._header('Annexure-IV: Training Attendance Sheet')
         html += f"""
@@ -172,15 +183,22 @@ class AnnexureService:
         ).order_by(TrainingAssignment.created_at.desc()).all()
 
         from app.models.user_mcq_attempt import UserMcqAttempt
+        # N+1 fix: batch-fetch documents + best attempt per document.
+        doc_ids = {a.document_id for a in assignments if a.document_id}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
+        best_by_doc: dict[int, UserMcqAttempt] = {}
+        if doc_ids:
+            for att in self.db.query(UserMcqAttempt).filter(
+                UserMcqAttempt.user_id == user_id,
+                UserMcqAttempt.document_id.in_(doc_ids),
+            ).all():
+                current = best_by_doc.get(att.document_id)
+                if current is None or (att.score or 0) > (current.score or 0):
+                    best_by_doc[att.document_id] = att
         rows = ''
         for a in assignments:
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
-            best = (
-                self.db.query(UserMcqAttempt)
-                .filter(UserMcqAttempt.user_id == user_id, UserMcqAttempt.document_id == a.document_id)
-                .order_by(UserMcqAttempt.score.desc())
-                .first()
-            ) if a.document_id else None
+            doc = docs.get(a.document_id)
+            best = best_by_doc.get(a.document_id) if a.document_id else None
             rows += f"""<tr>
               <td>{a.training_type.upper()}</td>
               <td>{doc.code if doc else '—'}</td>
@@ -215,12 +233,23 @@ class AnnexureService:
             users = users.filter(UserModel.department == department)
         users = users.all()
 
+        # N+1 fix: fetch all cGMP assignments for these users in ONE query,
+        # then keep the latest per user by (created_at, id) in memory — same
+        # result as the old order_by(created_at.desc()).first() per user.
+        user_ids = [u.id for u in users]
+        latest_cgmp: dict[int, TrainingAssignment] = {}
+        if user_ids:
+            for cgmp in self.db.query(TrainingAssignment).filter(
+                TrainingAssignment.user_id.in_(user_ids),
+                TrainingAssignment.training_type == 'cgmp',
+            ).all():
+                current = latest_cgmp.get(cgmp.user_id)
+                if current is None or (cgmp.created_at, cgmp.id) > (current.created_at, current.id):
+                    latest_cgmp[cgmp.user_id] = cgmp
+
         rows = ''
         for user in users:
-            cgmp = self.db.query(TrainingAssignment).filter(
-                TrainingAssignment.user_id == user.id,
-                TrainingAssignment.training_type == 'cgmp',
-            ).order_by(TrainingAssignment.created_at.desc()).first()
+            cgmp = latest_cgmp.get(user.id)
             rows += f'<tr><td>{user.employee_code}</td><td>{user.full_name}</td><td>{user.department or "—"}</td><td>{"Yes" if cgmp else "No"}</td><td>{cgmp.created_at.strftime("%d-%b-%Y") if cgmp else "—"}</td><td>{cgmp.status.upper() if cgmp else "NOT ASSIGNED"}</td></tr>'
 
         html = self._header(f'Annexure-XI: cGMP Refresher Training Record {year}')

@@ -15,8 +15,12 @@ class ProgressService:
 
     def update_progress(self, user_id: int, payload: ProgressUpdate):
         from app.core.redis import redis_client
+        from app.services.response_cache import invalidate_cached
         from app.tasks.report_tasks import sync_progress_to_db
         
+        # Progress changed → this user's cached dashboard/assigned/paths are stale.
+        invalidate_cached(f"resp:learning:{user_id}:")
+
         redis_key = f"user:{user_id}:progress:{payload.document_id}"
         
         # Get existing accumulated time from Redis first, fallback to DB

@@ -10,7 +10,9 @@ class ChildChunkAttempt(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False, index=True)
     child_chunk_id: Mapped[int] = mapped_column(ForeignKey('chunks.id'), nullable=False, index=True)
-    parent_chunk_id: Mapped[int] = mapped_column(ForeignKey('parent_chunks.id'), nullable=False, index=True)
+    # Nullable: legacy flat chunks have no parent section — their attempts are
+    # simply excluded from parent-mastery queries (NULL never matches a parent id).
+    parent_chunk_id: Mapped[int | None] = mapped_column(ForeignKey('parent_chunks.id'), nullable=True, index=True)
     document_id: Mapped[int] = mapped_column(ForeignKey('documents.id'), nullable=False, index=True)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     difficulty_shown: Mapped[str] = mapped_column(String(20), default='easy')

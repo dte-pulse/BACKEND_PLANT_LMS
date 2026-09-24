@@ -32,6 +32,14 @@ def process_document(self, document_id: int):
     db = SessionLocal()
     try:
         service = IngestionService(db)
+        # I-7: recover any documents left stuck by a previous worker death before
+        # starting a new job (cheap scan, only touches stale rows).
+        try:
+            recovered = service.recover_stale_ingestions()
+            if recovered:
+                logger.warning('Recovered %d stale ingestion(s) before processing doc %d', recovered, document_id)
+        except Exception as stale_exc:
+            logger.warning(f'Stale-ingestion recovery failed (non-critical): {stale_exc}')
         result = service.process_document(document_id)
 
         # ── Admin notification on success ─────────────────────────────────

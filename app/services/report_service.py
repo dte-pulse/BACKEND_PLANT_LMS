@@ -14,16 +14,22 @@ class ReportService:
 
     def get_global_readiness(self):
         from app.models.training import TrainingAssignment
-        total = self.db.query(TrainingAssignment).count()
+        from sqlalchemy import case, func
+        now = datetime.now(timezone.utc)
+        # Single round-trip: derive total/completed/overdue from one aggregate query.
+        row = self.db.query(
+            func.count(TrainingAssignment.id),
+            func.coalesce(func.sum(case((TrainingAssignment.status == 'completed', 1), else_=0)), 0),
+            func.coalesce(func.sum(case((
+                (TrainingAssignment.status != 'completed')
+                & TrainingAssignment.due_date.isnot(None)
+                & (TrainingAssignment.due_date < now),
+                1,
+            ), else_=0)), 0),
+        ).first()
+        total, completed, overdue = int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
         if total == 0:
             return {'readiness_score': 100.0, 'total_assignments': 0, 'completed': 0, 'pending': 0, 'overdue': 0}
-        completed = self.db.query(TrainingAssignment).filter(TrainingAssignment.status == 'completed').count()
-        now = datetime.now(timezone.utc)
-        overdue = self.db.query(TrainingAssignment).filter(
-            TrainingAssignment.status != 'completed',
-            TrainingAssignment.due_date.isnot(None),
-            TrainingAssignment.due_date < now,
-        ).count()
         return {
             'readiness_score': round((completed / total) * 100, 2),
             'total_assignments': total,
@@ -38,9 +44,12 @@ class ReportService:
         from app.models.training import TrainingAssignment
         from app.models.user import User
         from app.models.user_weakness_profile import UserWeaknessProfile
+        from sqlalchemy import func
 
         now = datetime.now(timezone.utc)
         users = self.db.query(User).filter(User.is_active == True).all()
+        user_ids = [u.id for u in users]
+        user_dept = {u.id: (u.department or 'Unknown') for u in users}
         dept_map: dict = {}
 
         for user in users:
@@ -56,9 +65,17 @@ class ReportService:
                 }
             dept_map[dept]['total_employees'] += 1
 
-            assignments = self.db.query(TrainingAssignment).filter(
-                TrainingAssignment.user_id == user.id
-            ).all()
+        # N+1 fix: fetch ALL assignments for these users in ONE query, then
+        # aggregate in memory instead of one query per user.
+        assignments_by_user: dict[int, list] = {}
+        if user_ids:
+            for a in self.db.query(TrainingAssignment).filter(
+                TrainingAssignment.user_id.in_(user_ids)
+            ).all():
+                assignments_by_user.setdefault(a.user_id, []).append(a)
+
+        for uid, assignments in assignments_by_user.items():
+            dept = user_dept[uid]
             dept_map[dept]['total_assignments'] += len(assignments)
             dept_map[dept]['completed'] += sum(1 for a in assignments if a.status == 'completed')
             dept_map[dept]['overdue'] += sum(
@@ -66,12 +83,23 @@ class ReportService:
                 if a.status != 'completed' and a.due_date and a.due_date < now
             )
 
-            weaknesses = self.db.query(UserWeaknessProfile).filter(
-                UserWeaknessProfile.user_id == user.id,
-                UserWeaknessProfile.is_critical == True,
-            ).count()
-            if weaknesses > 0:
-                dept_map[dept]['nq_employees'] += 1
+        # N+1 fix: critical-weakness counts per user via ONE grouped query.
+        if user_ids:
+            critical_counts = dict(
+                self.db.query(
+                    UserWeaknessProfile.user_id,
+                    func.count(UserWeaknessProfile.id),
+                )
+                .filter(
+                    UserWeaknessProfile.user_id.in_(user_ids),
+                    UserWeaknessProfile.is_critical == True,
+                )
+                .group_by(UserWeaknessProfile.user_id)
+                .all()
+            )
+            for uid in user_ids:
+                if critical_counts.get(uid, 0) > 0:
+                    dept_map[user_dept[uid]]['nq_employees'] += 1
 
         result = []
         for dept_data in dept_map.values():
@@ -96,12 +124,18 @@ class ReportService:
             TrainingAssignment.due_date < now,
         ).all()
 
+        # N+1 fix: batch-fetch referenced users + documents in two queries.
+        user_ids = {a.user_id for a in overdue_assignments if a.user_id}
+        doc_ids = {a.document_id for a in overdue_assignments if a.document_id}
+        users = {u.id: u for u in self.db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
+
         result = []
         for a in overdue_assignments:
-            user = self.db.query(User).filter(User.id == a.user_id).first()
+            user = users.get(a.user_id)
             if department and (not user or user.department != department):
                 continue
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
+            doc = docs.get(a.document_id)
             if a.due_date:
                 due_dt = a.due_date if a.due_date.tzinfo is not None else a.due_date.replace(tzinfo=timezone.utc)
                 days_overdue = (now - due_dt).days
@@ -133,21 +167,22 @@ class ReportService:
             UserWeaknessProfile.is_critical == True
         ).all()
 
-        result = []
-        seen = set()
+        # N+1 fix: group all critical profiles by user from the single fetch,
+        # then batch-load users with one query.
+        critical_by_user: dict[int, list] = {}
         for w in critical:
-            if w.user_id in seen:
-                continue
-            seen.add(w.user_id)
-            user = self.db.query(User).filter(User.id == w.user_id).first()
+            critical_by_user.setdefault(w.user_id, []).append(w)
+
+        user_ids = list(critical_by_user.keys())
+        users = {u.id: u for u in self.db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+
+        result = []
+        for user_id, weak_topics in critical_by_user.items():
+            user = users.get(user_id)
             if department and (not user or user.department != department):
                 continue
-            weak_topics = self.db.query(UserWeaknessProfile).filter(
-                UserWeaknessProfile.user_id == w.user_id,
-                UserWeaknessProfile.is_critical == True,
-            ).all()
             result.append({
-                'user_id': w.user_id,
+                'user_id': user_id,
                 'employee_code': user.employee_code if user else None,
                 'full_name': user.full_name if user else None,
                 'department': user.department if user else None,
@@ -237,15 +272,24 @@ class ReportService:
             TrainingAssignment.user_id == user_id
         ).order_by(TrainingAssignment.created_at.desc()).all()
 
+        # N+1 fix: batch-fetch documents, then derive best attempt per document
+        # from a single attempts query instead of one query per assignment.
+        doc_ids = {a.document_id for a in assignments if a.document_id}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
+        best_by_doc: dict[int, UserMcqAttempt] = {}
+        if doc_ids:
+            for att in self.db.query(UserMcqAttempt).filter(
+                UserMcqAttempt.user_id == user_id,
+                UserMcqAttempt.document_id.in_(doc_ids),
+            ).all():
+                current = best_by_doc.get(att.document_id)
+                if current is None or (att.score or 0) > (current.score or 0):
+                    best_by_doc[att.document_id] = att
+
         result = []
         for a in assignments:
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
-            best = (
-                self.db.query(UserMcqAttempt)
-                .filter(UserMcqAttempt.user_id == user_id, UserMcqAttempt.document_id == a.document_id)
-                .order_by(UserMcqAttempt.score.desc())
-                .first()
-            ) if a.document_id else None
+            doc = docs.get(a.document_id)
+            best = best_by_doc.get(a.document_id) if a.document_id else None
 
             result.append({
                 'assignment_id': a.id,

@@ -3,6 +3,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
+from app.utils.constants import EMBEDDING_DIM  # E-3: single source of truth
 
 class ParentChunk(Base):
     __tablename__ = 'parent_chunks'
@@ -15,7 +16,7 @@ class ParentChunk(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     page_start: Mapped[int] = mapped_column(Integer, default=1)
     page_end: Mapped[int] = mapped_column(Integer, default=1)
     token_count: Mapped[int] = mapped_column(Integer, default=0)

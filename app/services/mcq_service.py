@@ -75,7 +75,12 @@ class McqService:
 
     def _generate_with_gemini(self, chunks: list[Chunk], count: int, difficulty: str) -> list[dict]:
         from google import genai as genai_sdk
-        client = genai_sdk.Client(api_key=settings.gemini_api_key)
+        from google.genai import types
+        from app.utils.json_parser import parse_json_robustly
+        client = genai_sdk.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(timeout=30_000),
+        )
         
         chunks_context = ""
         for c in chunks:
@@ -93,7 +98,7 @@ class McqService:
         2. "true_false": True/False question (options: A: "True", B: "False").
         3. "descriptive": A short descriptive compliance question where options is exactly {{"A": "Submit written response"}} and correct_option is a model key answer description.
 
-        Return ONLY a JSON list of questions. Do not include any chat formatting, markdown backticks, or intro text. The JSON list must be strictly formatted as:
+        Return ONLY a JSON list of questions. The JSON list must be strictly formatted as:
         [
           {{
             "chunk_id": <int representing the Chunk ID from which this question is drawn>,
@@ -112,15 +117,15 @@ class McqService:
         ]
         """
         
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            )
+        )
         content_text = response.text.strip()
-        
-        if content_text.startswith("```"):
-            content_text = content_text.split("```")[1]
-            if content_text.startswith("json"):
-                content_text = content_text[4:]
-                
-        return json.loads(content_text.strip())
+        return parse_json_robustly(content_text)
 
     def _generate_mock(self, chunks: list[Chunk], count: int, difficulty: str) -> list[dict]:
         # Generate realistic questions statically using chunk keywords
@@ -173,7 +178,9 @@ class McqService:
             if not mcq:
                 raise ValueError(f"MCQ with id {submission.mcq_id} not found")
                 
-            is_correct = mcq.correct_option == submission.selected_option
+            # A-7: normalise the selected option so a lowercase 'a' is not
+            # counted wrong (matches the adaptive path which does .upper()).
+            is_correct = mcq.correct_option == submission.selected_option.upper()
             if is_correct:
                 correct_answers += 1
             else:
@@ -207,7 +214,12 @@ class McqService:
         )
         self.db.add(attempt)
         self.db.commit()
-        
+
+        # MCQ attempt + possible assignment-status change → training-record,
+        # dashboard and NQ reports are stale for this user.
+        from app.services.response_cache import invalidate_cached
+        invalidate_cached('resp:report:', f'resp:learning:{user_id}:')
+
         # Trigger retraining (30 days) for NQ users (score < 80%)
         if not passed:
             from datetime import datetime, timedelta
@@ -265,16 +277,36 @@ class McqService:
         }
 
     def get_final_assessment(self, document_id: int, count: int = 10):
-        import random
-        mcqs = self.list_mcqs_by_document(document_id)
-        if len(mcqs) > count:
-            return random.sample(mcqs, count)
-        return mcqs
+        """A-8: sample exams with topic balance instead of a flat random draw,
+        so exam composition is representative of the document's topics."""
+        return self._balanced_sample(self.list_mcqs_by_document(document_id), count)
 
     def get_effectiveness_exam(self, document_id: int, count: int = 15):
+        """A-8: same topic-balanced sampling as the final assessment."""
+        return self._balanced_sample(self.list_mcqs_by_document(document_id), count)
+
+    @staticmethod
+    def _balanced_sample(mcqs, count: int):
+        """Stratified random sample: proportionally allocate slots per topic,
+        then fill any leftover slots from the overall pool."""
         import random
-        mcqs = self.list_mcqs_by_document(document_id)
-        if len(mcqs) > count:
-            return random.sample(mcqs, count)
-        return mcqs
+        if len(mcqs) <= count:
+            return mcqs
+
+        by_topic: dict = {}
+        for m in mcqs:
+            by_topic.setdefault(m.topic_id, []).append(m)
+
+        sample = []
+        # proportional floor per topic
+        for topic_id, topic_mcqs in by_topic.items():
+            share = int(round(len(topic_mcqs) / len(mcqs) * count))
+            sample.extend(random.sample(topic_mcqs, min(share, len(topic_mcqs))))
+
+        # fill remaining slots from the overall pool (excluding already picked)
+        picked_ids = {m.id for m in sample}
+        pool = [m for m in mcqs if m.id not in picked_ids]
+        if len(sample) < count:
+            sample.extend(random.sample(pool, count - len(sample)))
+        return sample[:count]
 

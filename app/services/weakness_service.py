@@ -31,6 +31,10 @@ class WeaknessService:
             )
             updated = self.repository.create(new_profile)
 
+        # Weakness profile changed → NQ reports + this user's dashboard are stale.
+        from app.services.response_cache import invalidate_cached
+        invalidate_cached('resp:report:', f'resp:learning:{user_id}:')
+
         # Re-queue weak content to learner path if score drops below 80%
         if updated.score < 80.0:
             from app.models.user_progress import UserProgress

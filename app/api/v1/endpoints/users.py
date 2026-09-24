@@ -90,7 +90,10 @@ def update_user(
     user = repo.get(user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
-    return repo.update(user, **payload.model_dump(exclude_unset=True))
+    updated = repo.update(user, **payload.model_dump(exclude_unset=True))
+    from app.services.response_cache import invalidate_cached
+    invalidate_cached('resp:report:', f'resp:learning:{user_id}:')
+    return updated
 
 
 @router.post('/{user_id}/deactivate', status_code=status.HTTP_204_NO_CONTENT)
@@ -106,6 +109,8 @@ def deactivate_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
     repo.deactivate(user_id)
+    from app.services.response_cache import invalidate_cached
+    invalidate_cached('resp:report:', f'resp:learning:{user_id}:')
 
     log_audit_event(
         db=db,
@@ -131,6 +136,8 @@ def activate_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
     repo.activate(user_id)
+    from app.services.response_cache import invalidate_cached
+    invalidate_cached('resp:report:', f'resp:learning:{user_id}:')
 
     log_audit_event(
         db=db,
@@ -196,8 +203,15 @@ def import_users(
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
 
+    # VULN-007: cap CSV import size (10 MB) — the file is parsed fully in memory.
+    from app.core.config import settings as app_settings
+    max_csv_bytes = min(10 * 1024 * 1024, int(app_settings.max_upload_bytes))
+    content_bytes = file.file.read(max_csv_bytes + 1)
+    if len(content_bytes) > max_csv_bytes:
+        raise HTTPException(status_code=400, detail=f"CSV file too large. Maximum {max_csv_bytes // (1024 * 1024)} MB.")
+
     try:
-        content = file.file.read().decode('utf-8')
+        content = content_bytes.decode('utf-8-sig')
         csv_file = io.StringIO(content)
         reader = csv.DictReader(csv_file)
     except Exception as e:

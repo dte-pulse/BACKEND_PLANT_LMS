@@ -8,7 +8,12 @@ POST /learning/session/chunk/{chunk_id}/answer        → Submit answer; persist
 POST /learning/session/qa                             → RAG Q&A scoped to document
 POST /learning/session/chunk/{chunk_id}/understood    → Mark chunk as understood (no MCQ path)
 """
+import json
+import logging
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -20,6 +25,8 @@ from app.services.learning_session_service import LearningSessionService
 from app.services.rag_service import RagService
 
 router = APIRouter(prefix='/learning', tags=['learning-session'])
+
+logger = logging.getLogger(__name__)
 
 
 def _check_document_access(db: Session, user: User, document_id: int):
@@ -136,6 +143,8 @@ class AnswerResponse(BaseModel):
 class QARequest(BaseModel):
     document_id: int
     question: str
+    topic_id: int | None = None
+    rerank: bool = False  # R-3: opt-in cross-encoder reranking
 
 
 class QAResponse(BaseModel):
@@ -284,11 +293,12 @@ def submit_answer(
 @router.post('/session/chunk/{chunk_id}/understood', status_code=200)
 def mark_understood(
     chunk_id: int,
-    payload: dict = {},
+    payload: dict | None = None,  # A-6: no mutable default
     service: LearningSessionService = Depends(get_session_service),
     current_user: User = Depends(get_current_user),
 ):
     """Mark a chunk as understood without an MCQ (review mode shortcut)."""
+    payload = payload or {}
     chunk = service.get_chunk(chunk_id)
     if not chunk:
         raise HTTPException(status_code=404, detail='Chunk not found')
@@ -311,7 +321,7 @@ def mark_understood(
 @router.post('/chunks/{chunk_id}/understood', status_code=200)
 def mark_understood_alias(
     chunk_id: int,
-    payload: dict = {},
+    payload: dict | None = None,  # A-6: no mutable default
     service: LearningSessionService = Depends(get_session_service),
     current_user: User = Depends(get_current_user),
 ):
@@ -339,38 +349,172 @@ def get_nav_state(
     }
 
 
+def _check_qa_rate_limit(current_user: User):
+    """P0 throttle for the most expensive endpoint in the app.
+
+    Every QA call costs one Gemini embedding + a full-corpus BM25 scan + a
+    Gemini generation, so an unthrottled endpoint is an unbounded API bill.
+    Mirrors the mindmap-regen limiter: Redis fixed-window counter per user,
+    fail-open (with an in-process fallback budget) on Redis outage.
+    """
+    _QA_RL_MAX = 20
+    _QA_RL_WINDOW = 300  # 20 questions / 5 min / user
+    redis_error = None
+    try:
+        from app.core.redis import redis_client
+        _rl_key = f'ratelimit:qa:{current_user.id}'
+        _rl_count = int(redis_client.incr(_rl_key) or 0)
+        if _rl_count == 1:
+            redis_client.expire(_rl_key, _QA_RL_WINDOW)
+        if _rl_count > _QA_RL_MAX:
+            _rl_ttl = max(int(redis_client.ttl(_rl_key) or _QA_RL_WINDOW), 1)
+            raise HTTPException(
+                status_code=429,
+                detail=f'Question limit reached. Try again in {max(_rl_ttl // 60, 1)} minutes.',
+            )
+        return
+    except HTTPException:
+        raise
+    except Exception as _rl_err:
+        redis_error = _rl_err
+        logger.warning(f'QA rate limiter unavailable (using in-process fallback): {_rl_err}')
+    # Fail-OPEN to an in-process fallback budget (P-2: degradation must be
+    # "stricter", never "free") — per-user window tracked in this worker only.
+    import time as _time
+    _now = _time.monotonic()
+    _win = _qa_local_buckets.setdefault(current_user.id, [0, _now])
+    if _now - _win[1] >= _QA_RL_WINDOW:
+        _win[0], _win[1] = 0, _now
+    _win[0] += 1
+    if _win[0] > _QA_RL_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail=f'Question limit reached. Try again in {max(int(_QA_RL_WINDOW - (_now - _win[1])) // 60, 1)} minutes.',
+        )
+
+
+# user_id -> [count, window_start_monotonic] (in-process fail-open fallback only)
+_qa_local_buckets: dict[int, list] = {}
+
+
 @router.post('/session/qa', response_model=QAResponse)
 def ask_question(
     payload: QARequest,
     rag: RagService = Depends(get_rag_service),
     current_user: User = Depends(get_current_user),
 ):
-    """RAG-powered Q&A: retrieve relevant chunks and generate a Gemini-grounded answer."""
+    """RAG-powered Q&A: retrieve relevant chunks and generate a Gemini-grounded answer.
+
+    R-5 fix: mirrors QaService — resolves to the latest document version, keys
+    the semantic cache by resolved doc_id + version + topic, and restores
+    source provenance on cache hits so both QA paths behave identically.
+    """
+    _check_qa_rate_limit(current_user)
     _check_document_access(rag.db, current_user, payload.document_id)
 
+    from app.clients.langfuse_client import langfuse_observation
+    from app.evals.judges import judge_qa_groundedness
+
+    # One Langfuse trace per QA request: retrieval (retriever obs) and the LLM
+    # call (generation obs) nest inside automatically; the judge scores the trace.
+    with langfuse_observation(
+        name='rag-qa',
+        as_type='chain',
+        user_id=current_user.id,
+        session_id=f'doc-{payload.document_id}',
+        tags=['qa', 'rag'],
+        metadata={
+            'document_id': payload.document_id,
+            'question': payload.question[:500],
+            'topic_id': payload.topic_id,
+            'rerank': payload.rerank,
+            'feature': 'qa',
+        },
+    ) as trace:
+        result = _ask_question_impl(payload, rag, current_user)
+        # Eval: LLM-as-judge groundedness on the final answer (sampled).
+        # Skip on outage / out-of-scope replies (no sources) so the metric is
+        # not polluted by non-answer traffic.
+        source_chunks = result.get('source_chunks') or []
+        if source_chunks:
+            context_snippet = '\n'.join((c.content or '')[:600] for c in source_chunks)[:4000]
+            judge_qa_groundedness(payload.question, result.get('answer', ''), context_snippet, trace_obs=trace)
+        return result
+
+
+def _ask_question_impl(payload: QARequest, rag: RagService, current_user: User):
+    """The core QA flow — no observability wrapper (keeps one trace per request)."""
+    from app.models.document import Document
     from app.services.semantic_cache_service import SemanticCacheService
+    from app.services.rag_service import OUT_OF_SCOPE_REPLY
+
     cache = SemanticCacheService()
 
-    # 1. Embed query
-    query_vec = rag.embedding_client.embed_text(payload.question)
+    # 1. Resolve to the latest version (same resolution as QaService)
+    doc = rag.db.query(Document).filter(Document.id == payload.document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail='Document not found')
+    target_doc_id = payload.document_id
+    latest_doc = rag.db.query(Document).filter(
+        Document.code == doc.code,
+        Document.is_latest == True
+    ).first()
+    if latest_doc:
+        target_doc_id = latest_doc.id
+        doc = latest_doc
+    doc_version = doc.version
+    topic_id = doc.topic_id
 
-    # 2. Check Semantic Cache
-    cached_answer = cache.lookup(document_id=payload.document_id, query_embedding=query_vec)
-
-    if cached_answer is not None:
-        # Cache HIT!
-        from app.tasks.report_tasks import log_token_usage
-        log_token_usage.delay(current_user.id, 'session_qa_cache_hit', 0, 0, 0.0, True, 0)
+    # 2. Embed query (E-1: graceful reply on embedding outage instead of 500)
+    try:
+        query_vec = rag.embedding_client.embed_text(payload.question)
+    except Exception:
+        from app.services.rag_service import EMBEDDING_UNAVAILABLE_REPLY
         return {
             'question': payload.question,
-            'answer': cached_answer,
+            'answer': EMBEDDING_UNAVAILABLE_REPLY,
             'source_chunks': [],
         }
 
-    # 3. Cache MISS!
-    context_chunks = rag.retrieve_chunks(payload.document_id, payload.question, top_k=3)
+    # R-5: explicit topic override (matches QaService behavior)
+    if payload.topic_id is not None:
+        topic_id = payload.topic_id
+
+    # 3. Check Semantic Cache (version + topic scoped)
+    cached_entry = cache.lookup(
+        document_id=target_doc_id,
+        query_embedding=query_vec,
+        topic_id=topic_id,
+        doc_version=doc_version,
+    )
+
+    if cached_entry is not None:
+        # Cache HIT! Restore provenance (R-6)
+        from app.tasks.report_tasks import log_token_usage
+        log_token_usage.delay(current_user.id, 'session_qa_cache_hit', 0, 0, 0.0, True, 0)
+        source_chunk_ids = cached_entry.get('source_chunk_ids', [])
+        context_chunks = []
+        if source_chunk_ids:
+            from app.models.chunk import Chunk
+            context_chunks = rag.db.query(Chunk).filter(Chunk.id.in_(source_chunk_ids)).all()
+        return {
+            'question': payload.question,
+            'answer': cached_entry['answer'],
+            'source_chunks': context_chunks,
+        }
+
+    # 4. Cache MISS!
+    try:
+        context_chunks = rag.retrieve_chunks(target_doc_id, payload.question, top_k=3, rerank=payload.rerank)
+    except Exception:
+        # E-1: embedding outage surfaced mid-retrieval — reply clearly.
+        from app.services.rag_service import EMBEDDING_UNAVAILABLE_REPLY
+        return {
+            'question': payload.question,
+            'answer': EMBEDDING_UNAVAILABLE_REPLY,
+            'source_chunks': [],
+        }
     if not context_chunks:
-        from app.services.rag_service import OUT_OF_SCOPE_REPLY
         return {
             'question': payload.question,
             'answer': OUT_OF_SCOPE_REPLY,
@@ -379,12 +523,16 @@ def ask_question(
 
     answer = rag.generate_answer(payload.question, context_chunks)
 
-    # Store new result in Semantic Cache
+    # Store new result in Semantic Cache (version + topic scoped)
     cache.store(
-        document_id=payload.document_id,
+        document_id=target_doc_id,
         question=payload.question,
         query_embedding=query_vec,
-        answer=answer
+        answer=answer,
+        topic_id=topic_id,
+        doc_version=doc_version,
+        source_chunk_ids=[c.id for c in context_chunks],
+        page_refs=[c.page_no for c in context_chunks],
     )
 
     return {
@@ -399,42 +547,36 @@ def ask_question(
 
 # ── Document Structure ────────────────────────────────────────────────────────
 
-@router.get('/session/document/{document_id}/structure')
-def get_document_structure(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Returns the full hierarchical learning structure of a document:
-    parents (sections) → children (sub-chunks), with per-user progress.
-    """
-    _check_document_access(db, current_user, document_id)
-    service = LearningSessionService(db, user_id=current_user.id)
+def _structure_payload(db: Session, user: User, document_id: int) -> dict:
+    """Build the hierarchical structure payload for the cache/response."""
+    service = LearningSessionService(db, user_id=user.id)
     raw = service.get_document_structure(document_id)
 
     # Fetch all child chunk attempts for the user on this document in one query
     from app.models.child_chunk_attempt import ChildChunkAttempt
     attempts = db.query(ChildChunkAttempt).filter(
-        ChildChunkAttempt.user_id == current_user.id,
+        ChildChunkAttempt.user_id == user.id,
         ChildChunkAttempt.document_id == document_id
     ).all()
     attempts_by_child = {}
     for a in attempts:
         attempts_by_child.setdefault(a.child_chunk_id, []).append(a)
 
-    # Serialise SQLAlchemy objects to plain dicts for JSON response
+    # Serialise SQLAlchemy objects to plain dicts for JSON response.
+    # M-4 fix: report REAL per-child attempt counts from the attempts already
+    # fetched, while knowledge_score stays parent-derived (consistent with the
+    # adaptive mastery model, M-3).
     parents_out = []
     for entry in raw['parents']:
         parent = entry['parent']
         progress = entry['progress']
+        
+        parent_completed = progress.is_completed if progress else False
+        parent_score = progress.knowledge_score if progress else 0.0
+        
         children_out = []
         for child in entry['children']:
             c_attempts = attempts_by_child.get(child.id, [])
-            attempt_count = len(c_attempts)
-            correct_count = sum(1 for a in c_attempts if a.is_correct)
-            score = round((correct_count / attempt_count) * 100, 2) if attempt_count > 0 else 0.0
-            
             children_out.append({
                 'id': child.id,
                 'child_index': child.child_index,
@@ -443,9 +585,9 @@ def get_document_structure(
                 'content': child.content,
                 'learning_card': child.learning_card,
                 'token_count': child.token_count,
-                'knowledge_score': score,
-                'attempt_count': attempt_count,
-                'is_passed': score >= 80.0,
+                'knowledge_score': 100.0 if parent_completed else 0.0,
+                'attempt_count': len(c_attempts),
+                'is_passed': parent_completed,
             })
         parents_out.append({
             'id': parent.id,
@@ -472,6 +614,26 @@ def get_document_structure(
     }
 
 
+@router.get('/session/document/{document_id}/structure')
+def get_document_structure(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns the full hierarchical learning structure of a document:
+    parents (sections) → children (sub-chunks), with per-user progress.
+
+    Cached per user (short TTL) — the payload is heavy (all parents/children +
+    attempts) and is invalidated automatically on every answer submission via
+    the ``resp:learning:{user_id}:`` prefix.
+    """
+    _check_document_access(db, current_user, document_id)
+    from app.services.response_cache import get_cache
+    key = f'resp:learning:{current_user.id}:structure:{document_id}'
+    return get_cache().get_or_set(key, 60, lambda: _structure_payload(db, current_user, document_id))
+
+
 # ── Mind Map ──────────────────────────────────────────────────────────────────
 
 @router.get('/session/document/{document_id}/mindmap')
@@ -480,14 +642,167 @@ def get_mind_map(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Returns the interactive mind map tree for a document."""
+    """Returns the interactive mind map tree for a document.
+
+    P2 #5: cached 60s like /structure — the payload is heavy (prev-version
+    parents + children are re-fetched and diffed on every page load) and is
+    automatically refreshed for this user by the existing
+    ``resp:learning:{user_id}:`` invalidation on every answer submission.
+    """
     _check_document_access(db, current_user, document_id)
+    from app.services.response_cache import get_cache
+    key = f'resp:learning:{current_user.id}:mindmap:{document_id}'
+    return get_cache().get_or_set(key, 60, lambda: _mind_map_payload(db, current_user, document_id))
+
+
+def _mind_map_payload(db: Session, user: User, document_id: int) -> dict:
     from app.services.mind_map_service import MindMapService
-    svc = MindMapService(db, current_user.id)
+    svc = MindMapService(db, user.id)
     return svc.build_mind_map(document_id)
 
 
+@router.post('/session/document/{document_id}/mindmap/regenerate')
+def regenerate_mind_map(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Regenerate the mind map concept tree for an existing document using the current
+    parent chunk content. Useful when the mind map needs to be refreshed without
+    a full re-ingestion.
+
+    P1 #2: the LLM path is dispatched to Celery (it holds a worker for 10–30s);
+    the deterministic path (numbered documents — no model call) still completes
+    synchronously and returns the fresh map directly. LLM-path callers get
+    202 + a pollable status URL. Dispatch failures degrade to synchronous
+    regeneration so the feature never hard-breaks without a worker.
+    """
+    from app.models.document import Document
+    from app.services.mind_map_service import build_regenerated_tree, tree_regenerate_mode
+    from app.repositories.document_repository import DocumentRepository
+
+    # M-2 fix: only admin/HOD/trainer may mutate the shared concept tree.
+    if current_user.role not in (UserRole.admin, UserRole.hod, UserRole.trainer):
+        raise HTTPException(status_code=403, detail='Only admins, HODs and trainers can regenerate the mind map.')
+
+    # M-2 (rate limit): regeneration is an LLM-burning mutation of the SHARED
+    # tree — cap it per user+document (fail-open matches the login limiter's
+    # availability posture; the audit trail lives in Langfuse regardless).
+    _RL_MAX = 5
+    _RL_WINDOW = 600  # 5 regenerations / 10 min / user / document
+    try:
+        from app.core.redis import redis_client
+        _rl_key = f'ratelimit:mindmap-regen:{current_user.id}:{document_id}'
+        _rl_count = int(redis_client.incr(_rl_key) or 0)
+        if _rl_count == 1:
+            redis_client.expire(_rl_key, _RL_WINDOW)
+        if _rl_count > _RL_MAX:
+            _rl_ttl = max(int(redis_client.ttl(_rl_key) or _RL_WINDOW), 1)
+            raise HTTPException(
+                status_code=429,
+                detail=f'Mind map regeneration limit reached. Try again in {max(_rl_ttl // 60, 1)} minutes.',
+            )
+    except HTTPException:
+        raise
+    except Exception as _rl_err:
+        logger.warning(f'Mind map regenerate rate limiter unavailable (fail-open): {_rl_err}')
+
+    _check_document_access(db, current_user, document_id)
+
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    mode = tree_regenerate_mode(db, document)
+
+    # ── LLM path: dispatch to Celery (P1 #2) ─────────────────────────────────
+    if mode == 'llm':
+        try:
+            from app.tasks import mindmap_tasks
+            async_result = mindmap_tasks.regenerate_mind_map_tree.delay(document_id, current_user.id)
+            task_id = getattr(async_result, 'id', None)
+        except Exception as dispatch_err:
+            logger.warning(f'Celery dispatch failed for mindmap regen (sync fallback): {dispatch_err}')
+            task_id = None
+
+        if task_id:
+            from app.tasks.mindmap_tasks import set_status
+            set_status(document_id, 'queued', {'task_id': task_id})
+            return JSONResponse(
+                status_code=202,
+                content={
+                    'document_id': document_id,
+                    'regeneration': 'async',
+                    'task_id': task_id,
+                    'status_url': f'/learning/session/document/{document_id}/mindmap/regenerate/status',
+                },
+            )
+        # No worker available — degrade to synchronous so the feature still works.
+        mind_map_tree, _used_llm = build_regenerated_tree(db, document, user_id=current_user.id)
+        DocumentRepository(db).update(document, mind_map_json=mind_map_tree)
+    else:
+        # Deterministic path: cheap (titles + stored tree only), no model call.
+        mind_map_tree, _used_llm = build_regenerated_tree(db, document, user_id=current_user.id)
+        DocumentRepository(db).update(document, mind_map_json=mind_map_tree)
+
+    from app.services.mind_map_service import MindMapService
+    svc = MindMapService(db, current_user.id)
+    return {
+        **svc.build_mind_map(document_id),
+        'regenerated': True,
+        'concept_nodes_count': len(mind_map_tree),
+    }
+
+
+@router.get('/session/document/{document_id}/mindmap/regenerate/status')
+def mind_map_regen_status(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the status of an async (Celery) mind map regeneration (P1 #2)."""
+    _check_document_access(db, current_user, document_id)
+    from app.core.redis import redis_client
+    from app.tasks.mindmap_tasks import status_key
+    raw = redis_client.get(status_key(document_id))
+    if not raw:
+        return {'document_id': document_id, 'state': 'unknown'}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {'document_id': document_id, 'state': 'unknown'}
+
+
 # ── Child Chunk Q&A ───────────────────────────────────────────────────────────
+
+def _child_question_payload(db: Session, user: User, chunk_id: int) -> dict:
+    """Build the adaptive question payload for the cache/response."""
+    from app.models.chunk import Chunk as ChunkModel
+    from app.agents.adaptive_agent_service import AdaptiveAgentService
+    from app.services.adaptive_mcq_service import AdaptiveMcqService
+
+    chunk = db.query(ChunkModel).filter(ChunkModel.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail='Chunk not found')
+    _check_document_access(db, user, chunk.document_id)
+
+    coordinator = AdaptiveAgentService(db, user_id=user.id)
+    question_data = coordinator.get_next_question(user.id, chunk)
+
+    # Legacy contract preserved: knowledge_score / is_passed stay parent-derived
+    # (section mastery), while the new `mastery` block carries the concept-level
+    # capability state so the two signals never conflict.
+    adaptive = AdaptiveMcqService(db)
+    knowledge_score = adaptive.get_child_knowledge_score(user.id, chunk_id)
+
+    return {
+        **question_data,
+        'attempt_count': question_data['mastery']['attempts'],
+        'knowledge_score': knowledge_score,
+        'is_passed': knowledge_score >= 80.0,
+    }
+
 
 @router.get('/session/child/{chunk_id}/question')
 def get_child_question(
@@ -496,29 +811,24 @@ def get_child_question(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns the next adaptive question for a child chunk.
-    Difficulty escalates with each attempt: easy → medium → hard.
+    Agent-driven next question for a child chunk's parent section.
+    Difficulty and format adapt to the learner's concept mastery
+    (CurriculumAgent → QuestionGeneratorAgent), and the response carries the
+    learner's mastery state + the agents' decision trace.
+
+    Cached per user (short TTL) — cleared automatically when the answer is
+    submitted (``resp:learning:{user_id}:`` prefix invalidation), so each new
+    attempt still gets a fresh adaptive question.
     """
     from app.models.chunk import Chunk as ChunkModel
-    from app.services.adaptive_mcq_service import AdaptiveMcqService
-
     chunk = db.query(ChunkModel).filter(ChunkModel.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail='Chunk not found')
     _check_document_access(db, current_user, chunk.document_id)
 
-    adaptive = AdaptiveMcqService(db)
-    question_data = adaptive.get_next_question(current_user.id, chunk)
-    attempt_count = adaptive.get_child_attempt_count(current_user.id, chunk_id)
-    knowledge_score = adaptive.get_child_knowledge_score(current_user.id, chunk_id)
-
-    return {
-        **question_data,
-        'chunk_id': chunk_id,
-        'attempt_count': attempt_count,
-        'knowledge_score': knowledge_score,
-        'is_passed': knowledge_score >= 80.0,
-    }
+    from app.services.response_cache import get_cache
+    key = f'resp:learning:{current_user.id}:question:{chunk_id}'
+    return get_cache().get_or_set(key, 30, lambda: _child_question_payload(db, current_user, chunk_id))
 
 
 class ChildAnswerPayload(BaseModel):
@@ -567,11 +877,56 @@ def submit_child_answer(
     if not q_data:
         raise HTTPException(status_code=400, detail='Either mcq_id or question_data must be provided')
 
-    service = LearningSessionService(db, user_id=current_user.id)
-    return service.submit_child_answer(
+    from app.agents.adaptive_agent_service import AdaptiveAgentService
+    coordinator = AdaptiveAgentService(db, user_id=current_user.id)
+    return coordinator.submit_answer(
         user_id=current_user.id,
-        chunk_id=chunk_id,
+        chunk=chunk,
         question_data=q_data,
         selected_option=payload.selected_option,
         time_taken_seconds=payload.time_spent_seconds,
     )
+
+
+# ── Agent capability profile ─────────────────────────────────────────────────
+
+@router.get('/agent/profile')
+def get_agent_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Learner capability profile: concept mastery, weakness heatmap, strengths
+    and a prioritized study plan (RecommenderAgent).
+    """
+    from app.agents.adaptive_agent_service import AdaptiveAgentService
+    coordinator = AdaptiveAgentService(db, user_id=current_user.id)
+    return coordinator.recommender.build_profile(current_user.id)
+
+
+@router.get('/agent/profile/{document_id}')
+def get_agent_profile_for_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-document capability profile for the learner."""
+    _check_document_access(db, current_user, document_id)
+    from app.agents.adaptive_agent_service import AdaptiveAgentService
+    coordinator = AdaptiveAgentService(db, user_id=current_user.id)
+    return coordinator.recommender.build_profile(current_user.id, document_id=document_id)
+
+
+@router.get('/agent/mastery-history')
+def get_mastery_history(
+    document_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Score-over-time trajectory per concept (EMA replayed from attempts).
+    Optional ?document_id scopes the history to one document.
+    """
+    if document_id:
+        _check_document_access(db, current_user, document_id)
+    from app.agents.adaptive_agent_service import AdaptiveAgentService
+    coordinator = AdaptiveAgentService(db, user_id=current_user.id)
+    return coordinator.recommender.build_mastery_history(current_user.id, document_id)

@@ -13,12 +13,18 @@ def get_report_service(db: Session = Depends(get_db)):
     return ReportService(db)
 
 
+def _cache():
+    from app.services.response_cache import get_cache, REPORT_CACHE_TTL
+    return get_cache(), REPORT_CACHE_TTL
+
+
 @router.get('/global-readiness')
 def get_global_readiness(
     current_user: User = Depends(require_role([UserRole.admin, UserRole.hod])),
     service: ReportService = Depends(get_report_service),
 ):
-    return service.get_global_readiness()
+    cache, ttl = _cache()
+    return cache.get_or_set('resp:report:global-readiness', ttl, service.get_global_readiness)
 
 
 @router.get('/compliance')
@@ -27,7 +33,8 @@ def get_compliance_report(
     service: ReportService = Depends(get_report_service),
 ):
     """Department-by-department compliance breakdown."""
-    return service.get_compliance_report()
+    cache, ttl = _cache()
+    return cache.get_or_set('resp:report:compliance', ttl, service.get_compliance_report)
 
 
 @router.get('/overdue')
@@ -37,7 +44,9 @@ def get_overdue_report(
     service: ReportService = Depends(get_report_service),
 ):
     """List all overdue training assignments sorted by days overdue."""
-    return service.get_overdue_report(department=department)
+    cache, ttl = _cache()
+    key = f"resp:report:overdue:{department or 'all'}"
+    return cache.get_or_set(key, ttl, lambda: service.get_overdue_report(department=department))
 
 
 @router.get('/nq-employees')
@@ -47,7 +56,9 @@ def get_nq_employees(
     service: ReportService = Depends(get_report_service),
 ):
     """Employees with critical weak areas (repeated NQ status)."""
-    return service.get_nq_employees(department=department)
+    cache, ttl = _cache()
+    key = f"resp:report:nq:{department or 'all'}"
+    return cache.get_or_set(key, ttl, lambda: service.get_nq_employees(department=department))
 
 
 @router.get('/token-usage')
@@ -57,7 +68,8 @@ def get_token_usage(
     service: ReportService = Depends(get_report_service),
 ):
     """LLM token consumption and cost report for the given period."""
-    return service.get_token_usage_report(days=days)
+    cache, ttl = _cache()
+    return cache.get_or_set(f"resp:report:token-usage:{days}", ttl, lambda: service.get_token_usage_report(days=days))
 
 
 @router.get('/department-compliance/{department_name}')
@@ -66,7 +78,11 @@ def get_department_compliance(
     current_user: User = Depends(require_role([UserRole.admin, UserRole.hod])),
     service: ReportService = Depends(get_report_service),
 ):
-    return service.get_department_compliance(department_name)
+    cache, ttl = _cache()
+    return cache.get_or_set(
+        f"resp:report:dept-compliance:{department_name}", ttl,
+        lambda: service.get_department_compliance(department_name))
+
 
 
 @router.get('/user-history/{user_id}')
@@ -84,6 +100,17 @@ import csv
 import io
 from fastapi.responses import StreamingResponse
 
+
+def _csv_safe(value):
+    """Neutralize CSV formula injection (VULN-008).
+
+    Excel/Sheets interpret cells starting with =, +, -, @, tab or CR as formulas.
+    Prefix such cells with a single quote so they render as literal text.
+    """
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@', '\t', '\r'):
+        return f"'{value}"
+    return value
+
 @router.get('/compliance/export')
 def export_compliance_report(
     current_user: User = Depends(require_role([UserRole.admin, UserRole.hod])),
@@ -97,7 +124,7 @@ def export_compliance_report(
     writer.writerow(['Department', 'Total Employees', 'Total Assignments', 'Completed', 'Overdue', 'NQ Employees', 'Compliance Score'])
     for d in data:
         writer.writerow([
-            d['department'],
+            _csv_safe(d['department']),
             d['total_employees'],
             d['total_assignments'],
             d['completed'],
@@ -130,11 +157,11 @@ def export_overdue_report(
             d['assignment_id'],
             d['user_id'],
             d['employee_code'],
-            d['full_name'],
-            d['department'],
+            _csv_safe(d['full_name']),
+            _csv_safe(d['department']),
             d['training_type'],
             d['document_code'],
-            d['document_title'],
+            _csv_safe(d['document_title']),
             d['due_date'].strftime('%Y-%m-%d') if d['due_date'] else '',
             d['days_overdue'],
             d['status']
@@ -234,7 +261,7 @@ def export_annexure_records(
     headers = list(data[0].keys())
     writer.writerow(headers)
     for row in data:
-        writer.writerow([row.get(h) for h in headers])
+        writer.writerow([_csv_safe(row.get(h)) for h in headers])
         
     output.seek(0)
     return StreamingResponse(

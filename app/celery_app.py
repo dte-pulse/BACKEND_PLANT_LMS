@@ -14,6 +14,7 @@ celery_app = Celery(
     include=[
         'app.tasks.email_tasks',
         'app.tasks.document_tasks',
+        'app.tasks.mindmap_tasks',
         'app.tasks.notification_tasks',
         'app.tasks.reminder_tasks',
         'app.tasks.report_tasks',

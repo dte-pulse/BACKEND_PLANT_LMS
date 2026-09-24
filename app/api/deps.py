@@ -106,3 +106,23 @@ def require_role(roles: list[UserRole]):
             )
         return current_user
     return role_checker
+
+
+def ensure_document_access(db: Session, user: User, document_id: int) -> None:
+    """VULN-010: trainees may only access content of documents assigned to them.
+
+    Admin/HOD/trainer roles have unrestricted read access. Raises 403 when a
+    trainee has no TrainingAssignment for the document.
+    """
+    if user.role != UserRole.trainee:
+        return
+    from app.models.training import TrainingAssignment
+    assignment = db.query(TrainingAssignment).filter(
+        TrainingAssignment.user_id == user.id,
+        TrainingAssignment.document_id == document_id,
+    ).first()
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='You do not have access to this document. Contact your HOD or trainer.',
+        )

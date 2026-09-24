@@ -97,3 +97,8 @@ docker-volumes/
 *.p12
 *.pfx
 secrets/
+
+# ── Databases (VULN-012: never commit SQLite fixtures with user data) ───────
+*.db
+*.sqlite
+*.sqlite3

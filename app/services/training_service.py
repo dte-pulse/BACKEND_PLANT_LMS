@@ -22,6 +22,16 @@ class TrainingService:
         self.repository = repository
         self.db = repository.db
 
+    def _invalidate_caches(self, *user_ids: int | None):
+        """Best-effort: drop cached report/dashboard/learning data affected by a
+        training-assignment write so the next read is fresh."""
+        from app.services.response_cache import invalidate_cached
+        prefixes = ['resp:report:', 'resp:paths:']
+        for uid in user_ids:
+            if uid:
+                prefixes.append(f'resp:learning:{uid}:')
+        invalidate_cached(*prefixes)
+
     def _get_user(self, user_id: int) -> User | None:
         return self.db.query(User).filter(User.id == user_id).first()
 
@@ -178,6 +188,7 @@ class TrainingService:
             self._sync_sop_annexure(assignment)
         elif assignment.training_type == "cgmp":
             self._sync_cgmp_annexure(assignment)
+        self._invalidate_caches(assignment.user_id)
         return assignment
 
     def list_assignments(self, *, department: str | None = None, user_id: int | None = None, training_type: str | None = None, status: str | None = None):
@@ -200,13 +211,17 @@ class TrainingService:
         
         # If it's an OJT assignment, it needs verification
         if assignment.training_type == 'ojt' and not assignment.verified_by_trainer:
-            return self.repository.update(assignment, status="pending_verification")
+            result = self.repository.update(assignment, status="pending_verification")
+            self._invalidate_caches(assignment.user_id)
+            return result
         
-        return self.repository.update(
+        result = self.repository.update(
             assignment,
             status="completed",
             completed_at=datetime.now(timezone.utc)
         )
+        self._invalidate_caches(assignment.user_id)
+        return result
 
     def verify_ojt(self, assignment_id: int, trainer_id: int):
         assignment = self.repository.get_by_id(assignment_id)
@@ -222,6 +237,7 @@ class TrainingService:
             completed_at=datetime.now(timezone.utc)
         )
         self._sync_ojt_annexure(assignment)
+        self._invalidate_caches(assignment.user_id)
         return assignment
 
     def trigger_induction_training(self, user_id: int, document_ids: list[int], assigned_by_id: int | None = None):
@@ -337,10 +353,16 @@ class TrainingService:
         assignment = self.repository.get_by_id(assignment_id)
         if not assignment:
             raise ValueError("Assignment not found")
-        return self.repository.update(assignment, **kwargs)
+        result = self.repository.update(assignment, **kwargs)
+        self._invalidate_caches(assignment.user_id)
+        return result
 
     def delete_assignment(self, assignment_id: int):
-        return self.repository.delete(assignment_id)
+        assignment = self.repository.get_by_id(assignment_id)
+        ok = self.repository.delete(assignment_id)
+        if ok and assignment:
+            self._invalidate_caches(assignment.user_id)
+        return ok
 
     def review_assignment(self, assignment_id: int, reviewer_id: int, approved: bool, notes: str | None = None):
         assignment = self.repository.get_by_id(assignment_id)
@@ -350,13 +372,15 @@ class TrainingService:
             raise ValueError("Only pending approval assignments can be reviewed")
 
         next_status = "assigned" if approved else "rejected"
-        return self.repository.update(
+        result = self.repository.update(
             assignment,
             status=next_status,
             approved_by_id=reviewer_id,
             approval_notes=notes,
             approved_at=datetime.now(timezone.utc),
         )
+        self._invalidate_caches(assignment.user_id)
+        return result
 
     def list_assignment_evidence(self, assignment_id: int):
         assignment = self.repository.get_by_id(assignment_id)

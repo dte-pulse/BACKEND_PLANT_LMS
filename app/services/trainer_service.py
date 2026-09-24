@@ -64,10 +64,15 @@ class TrainerService:
             .order_by(TrainingAssignment.created_at.desc())
             .all()
         )
+        # N+1 fix: batch-fetch trainees + documents in two queries.
+        trainee_ids = {a.user_id for a in assignments if a.user_id}
+        doc_ids = {a.document_id for a in assignments if a.document_id}
+        trainees = {u.id: u for u in self.db.query(UserModel).filter(UserModel.id.in_(trainee_ids)).all()} if trainee_ids else {}
+        docs = {d.id: d for d in self.db.query(Document).filter(Document.id.in_(doc_ids)).all()} if doc_ids else {}
         result = []
         for a in assignments:
-            trainee = self.db.query(UserModel).filter(UserModel.id == a.user_id).first()
-            doc = self.db.query(Document).filter(Document.id == a.document_id).first() if a.document_id else None
+            trainee = trainees.get(a.user_id)
+            doc = docs.get(a.document_id)
             result.append({
                 'assignment_id': a.id,
                 'trainee_id': a.user_id,

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_auth_service, get_current_user, oauth2_scheme
@@ -8,6 +9,12 @@ from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.user import UserRead
 from app.services.auth_service import AuthService
 from app.utils.audit import log_audit_event
+from app.utils.rate_limit import (
+    LoginRateLimited,
+    check_login_allowed,
+    clear_failed_logins,
+    record_failed_login,
+)
 
 router = APIRouter(prefix='/auth', tags=['auth'])
 
@@ -19,24 +26,44 @@ def login(
     db: Session = Depends(get_db),
     auth_service: AuthService = Depends(get_auth_service)
 ):
+    ip_address = request.client.host if request.client else None
+
+    # VULN-006: throttle before touching the DB — account lockout + per-IP budget.
+    try:
+        check_login_allowed(payload.employee_code, ip_address)
+    except LoginRateLimited as rl:
+        log_audit_event(
+            db=db,
+            event='login_rate_limited',
+            employee_code=payload.employee_code,
+            ip_address=ip_address,
+            details=rl.reason
+        )
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={'detail': rl.reason},
+            headers={'Retry-After': str(rl.retry_after_seconds)},
+        )
+
     result = auth_service.login(payload.employee_code, payload.password)
     if not result:
+        record_failed_login(payload.employee_code, ip_address)
         log_audit_event(
             db=db,
             event='login_failed',
             employee_code=payload.employee_code,
-            ip_address=request.client.host if request.client else None,
+            ip_address=ip_address,
             details='Invalid credentials'
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid credentials')
-    
+
+    clear_failed_logins(payload.employee_code)
     log_audit_event(
         db=db,
-        event='login_success',
-        user_id=result['user_id'],
-        employee_code=payload.employee_code,
-        ip_address=request.client.host if request.client else None,
-        details=f"User logged in with role: {result['role']}"
+        event='login_success',            user_id=result['user_id'],
+            employee_code=payload.employee_code,
+            ip_address=ip_address,
+            details=f"User logged in with role: {result['role']}"
     )
     return result
 

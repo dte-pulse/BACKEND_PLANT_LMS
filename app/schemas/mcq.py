@@ -12,6 +12,8 @@ class MCQCreate(BaseModel):
     type: str = "objective"
 
 class MCQRead(BaseModel):
+    """Full MCQ — authoring/trainer view. NEVER serve to trainees pre-submission
+    (VULN-003: leaks correct_option)."""
     id: int
     document_id: int
     topic_id: int
@@ -20,6 +22,20 @@ class MCQRead(BaseModel):
     options: dict
     correct_option: str
     explanation: str | None = None
+    difficulty: str
+    type: str
+
+    model_config = {'from_attributes': True}
+
+
+class MCQPublicRead(BaseModel):
+    """Trainee-facing exam view — answer key and explanation withheld (VULN-003)."""
+    id: int
+    document_id: int
+    topic_id: int
+    chunk_id: int
+    question: str
+    options: dict
     difficulty: str
     type: str
 

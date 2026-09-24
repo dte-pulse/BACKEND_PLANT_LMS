@@ -49,8 +49,15 @@ class UserService:
                     status="assigned",
                     due_date=datetime.utcnow() + timedelta(days=30)
                 ))
-                
+
+        self._invalidate_user_caches()
         return created
 
     def list_users(self, *, department: str | None = None, role: str | None = None):
         return self.repository.list_all(department=department, role=role)
+
+    @staticmethod
+    def _invalidate_user_caches():
+        """User roster changed → compliance/nq reports are stale."""
+        from app.services.response_cache import invalidate_cached
+        invalidate_cached('resp:report:')

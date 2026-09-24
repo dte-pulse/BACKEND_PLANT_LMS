@@ -83,43 +83,41 @@ class DocumentService:
 
         user_ids: set[int] = set()
         impacted_departments: set[str] = set()
-        impacted_users: dict[int, dict] = {}
+        dept_assignment_departments: set[str] = set()
         direct_assignments = db.query(DocumentAssignment).filter(DocumentAssignment.document_id == document_id).all()
         for da in direct_assignments:
             if da.user_id:
                 user_ids.add(da.user_id)
-                user = db.query(User).filter(User.id == da.user_id).first()
-                if user:
-                    impacted_users[user.id] = {
-                        'user_id': user.id,
-                        'full_name': user.full_name,
-                        'employee_code': user.employee_code,
-                        'department': user.department,
-                    }
             elif da.department:
                 impacted_departments.add(da.department)
-                dept_users = db.query(User).filter(User.department == da.department, User.is_active == True).all()
-                for user in dept_users:
-                    user_ids.add(user.id)
-                    impacted_users[user.id] = {
-                        'user_id': user.id,
-                        'full_name': user.full_name,
-                        'employee_code': user.employee_code,
-                        'department': user.department,
-                    }
+                dept_assignment_departments.add(da.department)
 
         existing_assignments = db.query(TrainingAssignment).filter(TrainingAssignment.document_id == document_id).all()
         for assignment in existing_assignments:
             user_ids.add(assignment.user_id)
-            if assignment.user_id not in impacted_users:
-                user = db.query(User).filter(User.id == assignment.user_id).first()
-                if user:
-                    impacted_users[user.id] = {
-                        'user_id': user.id,
-                        'full_name': user.full_name,
-                        'employee_code': user.employee_code,
-                        'department': user.department,
-                    }
+
+        # N+1 fix: batch-fetch all referenced users + department rosters in two queries.
+        impacted_users: dict[int, dict] = {}
+        if user_ids:
+            for user in db.query(User).filter(User.id.in_(user_ids)).all():
+                impacted_users[user.id] = {
+                    'user_id': user.id,
+                    'full_name': user.full_name,
+                    'employee_code': user.employee_code,
+                    'department': user.department,
+                }
+        if dept_assignment_departments:
+            for user in db.query(User).filter(
+                User.department.in_(dept_assignment_departments),
+                User.is_active == True,
+            ).all():
+                user_ids.add(user.id)
+                impacted_users[user.id] = {
+                    'user_id': user.id,
+                    'full_name': user.full_name,
+                    'employee_code': user.employee_code,
+                    'department': user.department,
+                }
 
         return {
             'user_ids': user_ids,
@@ -194,6 +192,10 @@ class DocumentService:
         # Trigger retraining on publish
         if payload.get('status') == 'active':
             db = self.repository.db
+            from app.services.response_cache import invalidate_cached
+            # Document set changed → reports, training paths, and impacted users'
+            # learning data are all stale.
+            invalidate_cached('resp:report:', 'resp:paths:')
             try:
                 # Archive all previous versions of this document and perform atomic flip of is_latest
                 db.query(Document).filter(
@@ -265,11 +267,13 @@ class DocumentService:
                         progress.completion_percentage = 0.0
                         progress.current_chunk_id = None
                         db.add(progress)
-                        
+
                     try:
                         notif_svc.notify_sop_updated([uid], updated_doc.title)
                     except Exception:
                         pass
+
+                invalidate_cached(*(f'resp:learning:{uid}:' for uid in user_ids))
                 db.commit()
             except Exception:
                 db.rollback()

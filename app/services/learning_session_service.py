@@ -94,10 +94,12 @@ class LearningSessionService:
         return None
 
     def get_next_question_for_child(self, user_id: int, chunk_id: int) -> dict:
+        """Agent-driven question (CurriculumAgent → QuestionGeneratorAgent)."""
         chunk = self.db.query(Chunk).filter(Chunk.id == chunk_id).first()
         if not chunk:
             raise ValueError(f'Chunk {chunk_id} not found')
-        return self.adaptive_mcq.get_next_question(user_id, chunk)
+        from app.agents.adaptive_agent_service import AdaptiveAgentService
+        return AdaptiveAgentService(self.db, user_id=user_id).get_next_question(user_id, chunk)
 
     def submit_child_answer(
         self,
@@ -107,147 +109,20 @@ class LearningSessionService:
         selected_option: str,
         time_taken_seconds: int = 0,
     ) -> dict:
-        from sqlalchemy.orm import defer
+        """Delegates to the AdaptiveAgentService coordinator (evaluator agent,
+        weakness agent, curriculum agent) — single source of truth for the
+        adaptive answer loop."""
         chunk = self.db.query(Chunk).options(defer(Chunk.embedding)).filter(Chunk.id == chunk_id).first()
         if not chunk:
             raise ValueError(f'Chunk {chunk_id} not found')
-        
-        is_correct = selected_option.upper() == question_data['correct_option'].upper()
-        
-        re_explanation = None
-        if not is_correct:
-            re_explanation = self.adaptive_mcq.get_re_explanation(
-                chunk, selected_option, question_data['correct_option']
-            )
-        
-        attempt = self.adaptive_mcq.record_attempt(
+        from app.agents.adaptive_agent_service import AdaptiveAgentService
+        return AdaptiveAgentService(self.db, user_id=user_id).submit_answer(
             user_id=user_id,
             chunk=chunk,
             question_data=question_data,
             selected_option=selected_option,
             time_taken_seconds=time_taken_seconds,
-            re_explanation=re_explanation,
         )
-
-        # Update UserProgress record to keep dashboard synced
-        from app.models.user_progress import UserProgress
-        from app.models.child_chunk_attempt import ChildChunkAttempt
-        from app.models.training import TrainingAssignment
-        from datetime import timezone
-        
-        # Get all chunks for this document
-        doc_chunks = self.db.query(Chunk).options(defer(Chunk.embedding)).filter(
-            Chunk.document_id == chunk.document_id
-        ).all()
-        
-        doc_chunk_ids = [dc.id for dc in doc_chunks]
-        
-        # Get all attempts
-        all_attempts = self.db.query(ChildChunkAttempt).filter(
-            ChildChunkAttempt.user_id == user_id,
-            ChildChunkAttempt.child_chunk_id.in_(doc_chunk_ids)
-        ).all()
-        
-        attempts_by_child = {}
-        for a in all_attempts:
-            attempts_by_child.setdefault(a.child_chunk_id, []).append(a)
-            
-        passed_count = 0
-        for dc in doc_chunks:
-            dc_attempts = attempts_by_child.get(dc.id, [])
-            if dc_attempts:
-                correct = sum(1 for a in dc_attempts if a.is_correct)
-                score = (correct / len(dc_attempts)) * 100
-                if score >= 80.0:
-                    passed_count += 1
-                    
-        completion_pct = round((passed_count / len(doc_chunks) * 100), 2) if doc_chunks else 0.0
-        
-        progress = self.db.query(UserProgress).filter(
-            UserProgress.user_id == user_id,
-            UserProgress.document_id == chunk.document_id
-        ).first()
-        
-        if not progress:
-            progress = UserProgress(
-                user_id=user_id,
-                document_id=chunk.document_id,
-                topic_id=chunk.topic_id or 0,
-                current_chunk_id=chunk_id,
-                current_page=chunk.page_no,
-                completion_percentage=completion_pct,
-                time_spent_seconds=time_taken_seconds,
-                last_accessed_at=datetime.now(timezone.utc)
-            )
-            self.db.add(progress)
-        else:
-            progress.completion_percentage = completion_pct
-            progress.current_chunk_id = chunk_id
-            progress.current_page = chunk.page_no
-            progress.time_spent_seconds = (progress.time_spent_seconds or 0) + time_taken_seconds
-            progress.last_accessed_at = datetime.now(timezone.utc)
-            
-        self.db.commit()
-
-        # Update assignment status when 100% completed
-        if completion_pct >= 100.0:
-            assignment = self.db.query(TrainingAssignment).filter(
-                TrainingAssignment.user_id == user_id,
-                TrainingAssignment.document_id == chunk.document_id,
-                TrainingAssignment.status != 'completed'
-            ).first()
-            if assignment:
-                assignment.status = 'completed'
-                self.db.commit()
-        
-        knowledge_score = self.adaptive_mcq.get_child_knowledge_score(user_id, chunk_id)
-        child_passed = knowledge_score >= 80.0
-        
-        next_child = None
-        parent_completed = False
-        document_completed = False
-        
-        if child_passed:
-            if chunk.parent_chunk_id:
-                siblings = self.db.query(Chunk).options(defer(Chunk.embedding)).filter(
-                    Chunk.parent_chunk_id == chunk.parent_chunk_id,
-                    Chunk.child_index > chunk.child_index
-                ).order_by(Chunk.child_index).first()
-                
-                if siblings:
-                    next_child = self._chunk_to_dict(siblings)
-                else:
-                    parent_completed = True
-                    current_parent = self.db.query(ParentChunk).options(defer(ParentChunk.embedding)).filter(
-                        ParentChunk.id == chunk.parent_chunk_id
-                    ).first()
-                    if current_parent:
-                        next_parent = self.db.query(ParentChunk).options(defer(ParentChunk.embedding)).filter(
-                            ParentChunk.document_id == chunk.document_id,
-                            ParentChunk.section_index > current_parent.section_index
-                        ).order_by(ParentChunk.section_index).first()
-                        if next_parent:
-                            first_child_of_next = self.db.query(Chunk).options(defer(Chunk.embedding)).filter(
-                                Chunk.parent_chunk_id == next_parent.id
-                            ).order_by(Chunk.child_index).first()
-                            if first_child_of_next:
-                                next_child = self._chunk_to_dict(first_child_of_next)
-                        else:
-                            document_completed = True
-        
-        return {
-            'is_correct': is_correct,
-            'correct_option': question_data['correct_option'],
-            'explanation': question_data.get('explanation', ''),
-            're_explanation': re_explanation,
-            'child_passed': child_passed,
-            'knowledge_score': knowledge_score,
-            'attempt_number': attempt.attempt_number,
-            'difficulty': attempt.difficulty_shown,
-            'next_child': next_child,
-            'parent_completed': parent_completed,
-            'document_completed': document_completed,
-        }
 
     def _chunk_to_dict(self, chunk: Chunk) -> dict:
         return {
@@ -343,7 +218,13 @@ class LearningSessionService:
         
         # Trigger async sync to PostgreSQL
         sync_progress_to_db.delay(user_id, document_id)
-        
+
+        # Structure/question responses are cached per user — a legacy-path answer
+        # must refresh them too (the adaptive path already invalidates via
+        # WeaknessAgent.record_answer).
+        from app.services.response_cache import invalidate_cached
+        invalidate_cached(f'resp:learning:{user_id}:')
+
         # Fetch or return transient progress
         progress = (
             self.db.query(UserProgress)
@@ -448,7 +329,12 @@ class LearningSessionService:
             return None
 
         from google import genai as genai_sdk
-        client = genai_sdk.Client(api_key=settings.gemini_api_key)
+        from google.genai import types
+        from app.utils.json_parser import parse_json_robustly
+        client = genai_sdk.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(timeout=30_000),
+        )
 
         prompt = f"""Generate exactly 1 multiple-choice question based STRICTLY on the content below.
 
@@ -468,24 +354,28 @@ Return ONLY valid JSON (no markdown, no backticks) in this exact format:
 
         t0 = time.monotonic()
         try:
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
             text = response.text.strip()
             latency_ms = int((time.monotonic() - t0) * 1000)
 
             
-            # Log token usage
-            p_tokens = max(1, len(prompt) // 4)
-            c_tokens = max(1, len(text) // 4)
+            # Log token usage (C-2: shared estimator)
             from app.tasks.report_tasks import log_token_usage
+            from app.utils.tokenizer import estimate_tokens, estimate_cost
+            p_tokens = estimate_tokens(prompt)
+            c_tokens = estimate_tokens(text)
             log_token_usage.delay(
                 self.rag.user_id, 'mcq_gen', p_tokens, c_tokens,
-                (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000, False, latency_ms
+                estimate_cost(p_tokens, c_tokens), False, latency_ms
             )
 
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1])
-            data = json.loads(text)
+            data = parse_json_robustly(text)
             mcq = MCQBank(
                 document_id=chunk.document_id,
                 topic_id=chunk.topic_id,

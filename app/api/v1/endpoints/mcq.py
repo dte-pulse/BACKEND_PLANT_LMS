@@ -2,23 +2,45 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.mcq_service import McqService
-from app.schemas.mcq import MCQRead, MCQGenerateRequest, MCQEditRequest
+from app.schemas.mcq import MCQRead, MCQPublicRead, MCQGenerateRequest, MCQEditRequest
+from app.models.user import User, UserRole
+from app.api.deps import get_current_user
 
 router = APIRouter(prefix="/mcq", tags=["mcq"])
 
 def get_mcq_service(db: Session = Depends(get_db)):
     return McqService(db)
 
-@router.get("/document/{document_id}", response_model=list[MCQRead])
-def list_mcqs(document_id: int, service: McqService = Depends(get_mcq_service)):
-    return service.list_mcqs_by_document(document_id)
+# VULN-003: only authoring roles may see the answer key before submission.
+def _can_view_answers(user: User) -> bool:
+    return user.role in (UserRole.admin, UserRole.hod, UserRole.trainer)
 
-@router.post("/generate", response_model=list[MCQRead], status_code=status.HTTP_201_CREATED)
-def generate_mcqs(payload: MCQGenerateRequest, service: McqService = Depends(get_mcq_service)):
+
+def _serialize_mcqs(mcqs, user: User) -> list[dict]:
+    """Role-aware serialization — trainees get MCQs without correct_option/explanation."""
+    if _can_view_answers(user):
+        return [MCQRead.model_validate(m).model_dump(mode='json') for m in mcqs]
+    return [MCQPublicRead.model_validate(m).model_dump(mode='json') for m in mcqs]
+
+@router.get("/document/{document_id}")
+def list_mcqs(
+    document_id: int,
+    service: McqService = Depends(get_mcq_service),
+    current_user: User = Depends(get_current_user),
+):
+    return _serialize_mcqs(service.list_mcqs_by_document(document_id), current_user)
+
+@router.post("/generate", status_code=status.HTTP_201_CREATED)
+def generate_mcqs(
+    payload: MCQGenerateRequest,
+    service: McqService = Depends(get_mcq_service),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return service.generate_mcqs(payload.document_id, payload.count, payload.difficulty)
+        created = service.generate_mcqs(payload.document_id, payload.count, payload.difficulty)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return _serialize_mcqs(created, current_user)
 
 from app.schemas.mcq import MCQAssessmentSubmit, MCQAssessmentResult
 from app.models.user import User
@@ -50,20 +72,22 @@ def delete_mcq(mcq_id: int, service: McqService = Depends(get_mcq_service)):
     return None
 
 
-@router.get("/document/{document_id}/final-assessment", response_model=list[MCQRead])
+@router.get("/document/{document_id}/final-assessment")
 def get_final_assessment(
     document_id: int,
-    service: McqService = Depends(get_mcq_service)
+    service: McqService = Depends(get_mcq_service),
+    current_user: User = Depends(get_current_user),
 ):
-    return service.get_final_assessment(document_id)
+    return _serialize_mcqs(service.get_final_assessment(document_id), current_user)
 
 
-@router.get("/document/{document_id}/effectiveness-exam", response_model=list[MCQRead])
+@router.get("/document/{document_id}/effectiveness-exam")
 def get_effectiveness_exam(
     document_id: int,
-    service: McqService = Depends(get_mcq_service)
+    service: McqService = Depends(get_mcq_service),
+    current_user: User = Depends(get_current_user),
 ):
-    return service.get_effectiveness_exam(document_id)
+    return _serialize_mcqs(service.get_effectiveness_exam(document_id), current_user)
 
 
 @router.post("/document/{document_id}/effectiveness-exam/submit", response_model=MCQAssessmentResult)

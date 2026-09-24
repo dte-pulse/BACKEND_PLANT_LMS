@@ -20,6 +20,7 @@ from app.api.v1.endpoints.annexure import router as annexure_router
 from app.api.v1.endpoints.departments import router as departments_router
 from app.api.v1.endpoints.learning_session import router as learning_session_router
 from app.api.v1.endpoints.document_assignments import router as document_assignments_router
+from app.api.v1.endpoints.observability import router as observability_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -42,6 +43,7 @@ api_router.include_router(learning_session_router, dependencies=auth_deps)
 api_router.include_router(qa_router, dependencies=auth_deps)
 api_router.include_router(notifications_router, dependencies=auth_deps)
 api_router.include_router(reports_router, dependencies=auth_deps)
+api_router.include_router(observability_router, dependencies=auth_deps)
 api_router.include_router(calendar_router, dependencies=auth_deps)
 api_router.include_router(attendance_router, dependencies=auth_deps)
 api_router.include_router(annexure_router, dependencies=auth_deps)

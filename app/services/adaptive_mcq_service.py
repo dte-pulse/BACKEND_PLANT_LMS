@@ -2,10 +2,11 @@
 Adaptive MCQ Service
 ====================
 Handles the full adaptive question-answer loop for child chunks:
-- Determines appropriate difficulty based on attempt history
-- Tries MCQ bank cache first (pre-generated), falls back to dynamic Gemini generation
-- Tracks attempt history to compute child_chunk knowledge score
-- 80% threshold to pass a child chunk (score = correct / total_attempts * 100)
+- Serves cached MCQ bank questions per parent section (medium difficulty)
+- Falls back to dynamic Gemini generation when the bank is exhausted
+- Tracks attempt history to compute parent section knowledge score
+- A parent section passes only after a mastery criterion is met
+  (latest attempt correct AND ≥80% correct over the last MASTERY_WINDOW attempts)
 """
 import json
 import logging
@@ -22,7 +23,13 @@ from app.models.parent_chunk_progress import ParentChunkProgress
 logger = logging.getLogger(__name__)
 
 PASS_THRESHOLD = 80.0  # percent
-DIFFICULTY_MAP = {1: 'easy', 2: 'medium', 3: 'hard'}  # attempt_number -> difficulty
+
+# A-1: mastery window + ratio for section pass/fail. A single correct answer
+# no longer passes a whole section, and one wrong answer no longer wipes it out.
+# With a 5-attempt window and 0.8 ratio, a user must get ≥4 of their last 5
+# attempts correct (with the latest correct) to pass.
+MASTERY_WINDOW = 5  # consider the last N attempts (chronological)
+MASTERY_RATIO = 0.8  # ≥80% of the window must be correct
 
 class AdaptiveMcqService:
     def __init__(self, db: Session):
@@ -35,57 +42,77 @@ class AdaptiveMcqService:
             ChildChunkAttempt.child_chunk_id == child_chunk_id
         ).count()
 
-    def get_child_knowledge_score(self, user_id: int, child_chunk_id: int) -> float:
-        """Returns 0-100 score: (correct_attempts / total_attempts) * 100"""
-        attempts = self.db.query(ChildChunkAttempt).filter(
+    def is_parent_passed(self, user_id: int, parent_chunk_id: int) -> bool:
+        """Returns True when the user has demonstrated mastery of this section.
+
+        Mastery = the latest attempt is correct AND ≥80% of the last
+        MASTERY_WINDOW chronological attempts are correct. Ordering uses the
+        attempt PK (id) — attempt_number is per-child and NOT chronological
+        across children of the same parent (A-1 fix).
+        """
+        recent = self.db.query(ChildChunkAttempt).filter(
             ChildChunkAttempt.user_id == user_id,
-            ChildChunkAttempt.child_chunk_id == child_chunk_id
-        ).all()
-        if not attempts:
+            ChildChunkAttempt.parent_chunk_id == parent_chunk_id
+        ).order_by(ChildChunkAttempt.id.desc()).limit(MASTERY_WINDOW).all()
+
+        # A single correct answer must NOT pass a whole section (A-1).
+        if len(recent) < 2:
+            return False
+        if not recent[0].is_correct:  # latest attempt must be correct
+            return False
+        correct_count = sum(1 for a in recent if a.is_correct)
+        return (correct_count / len(recent)) >= MASTERY_RATIO
+
+    def get_child_knowledge_score(self, user_id: int, child_chunk_id: int) -> float:
+        """Returns 100.0 if the parent chunk is passed, else 0.0"""
+        chunk = self.db.query(Chunk).filter(Chunk.id == child_chunk_id).first()
+        if not chunk or not chunk.parent_chunk_id:
             return 0.0
-        correct = sum(1 for a in attempts if a.is_correct)
-        return round((correct / len(attempts)) * 100, 2)
+        return 100.0 if self.is_parent_passed(user_id, chunk.parent_chunk_id) else 0.0
 
     def is_child_passed(self, user_id: int, child_chunk_id: int) -> bool:
-        """Returns True if user has achieved >= 80% on this child chunk"""
-        score = self.get_child_knowledge_score(user_id, child_chunk_id)
-        return score >= PASS_THRESHOLD
-
-    def get_difficulty_for_next_attempt(self, user_id: int, child_chunk_id: int) -> str:
-        """Escalates difficulty: attempt 1=easy, 2=medium, 3+=hard"""
-        count = self.get_child_attempt_count(user_id, child_chunk_id)
-        return DIFFICULTY_MAP.get(count + 1, 'hard')
+        """Returns True if user has passed this child's parent section"""
+        return self.get_child_knowledge_score(user_id, child_chunk_id) >= PASS_THRESHOLD
 
     def get_next_question(self, user_id: int, chunk: Chunk) -> dict:
         """
-        Get the next question for this user on this child chunk.
-        1. Determine difficulty based on attempt history
-        2. Try MCQ bank first (filter by difficulty, exclude already-shown MCQ IDs)
-        3. If no cached MCQ matches, generate dynamically via Gemini
-        Returns: {'question': str, 'options': dict, 'correct_option': str, 
-                  'explanation': str, 'difficulty': str, 'mcq_id': int|None, 'is_dynamic': bool}
+        Get the next question for this user on this parent chunk section.
+        1. Query all sibling chunks under the parent chunk.
+        2. Fetch cached MCQs associated with any of those sibling chunks.
+        3. Exclude already-shown MCQ IDs for this user in this section.
+        4. If no cached MCQ matches, generate dynamically via Gemini using the section content.
         """
-        difficulty = self.get_difficulty_for_next_attempt(user_id, chunk.id)
+        difficulty = 'medium'
+        parent_id = chunk.parent_chunk_id
         
-        # Get already-shown MCQ IDs for this user+chunk to avoid repeats
+        # Get sibling chunks of this section
+        sibling_chunks = self.db.query(Chunk).filter(Chunk.parent_chunk_id == parent_id).all()
+        sibling_ids = [c.id for c in sibling_chunks]
+        
+        # Get already-shown MCQ IDs for this user+parent to avoid repeats
         shown_mcq_ids = [
             a.mcq_id for a in self.db.query(ChildChunkAttempt).filter(
                 ChildChunkAttempt.user_id == user_id,
-                ChildChunkAttempt.child_chunk_id == chunk.id,
+                ChildChunkAttempt.parent_chunk_id == parent_id,
                 ChildChunkAttempt.mcq_id.isnot(None)
             ).all() if a.mcq_id
         ]
         
-        # Try cache first
+        # Try cache first - query all MCQs under sibling chunks
         cached_mcqs = self.db.query(MCQBank).filter(
-            MCQBank.chunk_id == chunk.id,
-            MCQBank.difficulty == difficulty
+            MCQBank.chunk_id.in_(sibling_ids),
+            MCQBank.difficulty == 'medium'
         ).all()
         
+        # Fallback to any cached MCQs if no medium ones exist
+        if not cached_mcqs:
+            cached_mcqs = self.db.query(MCQBank).filter(
+                MCQBank.chunk_id.in_(sibling_ids)
+            ).all()
+            
         available = [m for m in cached_mcqs if m.id not in shown_mcq_ids]
-        if not available:
-            available = cached_mcqs  # reuse if all shown
-        
+        # No reuse fallback: when every bank MCQ has been shown, fall through to
+        # dynamic Gemini generation below instead of looping the same question.
         if available:
             mcq = random.choice(available)
             return {
@@ -97,16 +124,41 @@ class AdaptiveMcqService:
                 'mcq_id': mcq.id,
                 'is_dynamic': False,
             }
-        
-        # Fall back to dynamic generation
-        return self._generate_dynamic_question(chunk, difficulty)
 
-    def _generate_dynamic_question(self, chunk: Chunk, difficulty: str) -> dict:
+        # No unseen bank MCQ. With an LLM we generate a fresh dynamic question
+        # below. Without one, widen to any UNSEEN MCQ across the section (any
+        # difficulty), then reuse a seen one as last resort — never loop the
+        # same generic fallback question on every attempt.
+        from app.clients.llm_client import LLMClient
+        if not LLMClient().model:
+            all_cached = self.db.query(MCQBank).filter(
+                MCQBank.chunk_id.in_(sibling_ids)
+            ).all()
+            unseen = [m for m in all_cached if m.id not in shown_mcq_ids]
+            pool = unseen or all_cached
+            if pool:
+                mcq = random.choice(pool)
+                return {
+                    'question': mcq.question,
+                    'options': mcq.options,
+                    'correct_option': mcq.correct_option,
+                    'explanation': mcq.explanation or '',
+                    'difficulty': mcq.difficulty,
+                    'mcq_id': mcq.id,
+                    'is_dynamic': False,
+                }
+
+        # Fall back to dynamic generation using parent chunk content
+        parent_chunk = self.db.query(ParentChunk).filter(ParentChunk.id == parent_id).first()
+        return self._generate_dynamic_question(parent_chunk or chunk, difficulty)
+
+    def _generate_dynamic_question(self, chunk, difficulty: str) -> dict:
         """
         Generate a dynamic MCQ via Gemini based on difficulty.
         Returns same dict structure as get_next_question.
         """
         from app.core.config import settings
+        from app.utils.json_parser import parse_json_robustly
         import time
         
         if not settings.gemini_api_key or settings.gemini_api_key in ('change-me', 'replace-me'):
@@ -137,14 +189,21 @@ Return ONLY valid JSON (no markdown, no backticks, no extra text):
         
         try:
             from google import genai as genai_sdk
-            client = genai_sdk.Client(api_key=settings.gemini_api_key)
+            from google.genai import types
+            client = genai_sdk.Client(
+                api_key=settings.gemini_api_key,
+                http_options=types.HttpOptions(timeout=30_000),
+            )
             t0 = time.monotonic()
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
             text = response.text.strip()
-            if text.startswith('```'):
-                lines = text.split('\n')
-                text = '\n'.join(lines[1:-1])
-            data = json.loads(text)
+            data = parse_json_robustly(text)
             return {
                 'question': data['question'],
                 'options': data['options'],
@@ -158,14 +217,14 @@ Return ONLY valid JSON (no markdown, no backticks, no extra text):
             logger.error(f'Dynamic MCQ generation failed: {e}')
             return self._fallback_question(chunk)
 
-    def _fallback_question(self, chunk: Chunk) -> dict:
+    def _fallback_question(self, chunk) -> dict:
         """Simple fallback when Gemini is unavailable"""
         return {
             'question': f'What is the main topic discussed in this section?',
             'options': {'A': 'Safety procedures', 'B': 'Quality control', 'C': 'Documentation requirements', 'D': 'The content of this section'},
             'correct_option': 'D',
             'explanation': 'Please review the section content carefully.',
-            'difficulty': 'easy',
+            'difficulty': 'medium',
             'mcq_id': None,
             'is_dynamic': True,
         }
@@ -221,33 +280,13 @@ Return ONLY valid JSON (no markdown, no backticks, no extra text):
         ).all()
         
         children_total = len(all_children)
-        all_child_ids = [c.id for c in all_children]
-
-        # 2. Bulk query all attempts for all children of this parent
-        attempts = self.db.query(ChildChunkAttempt).filter(
-            ChildChunkAttempt.user_id == user_id,
-            ChildChunkAttempt.child_chunk_id.in_(all_child_ids)
-        ).all()
-
-        attempts_by_child = {}
-        for a in attempts:
-            attempts_by_child.setdefault(a.child_chunk_id, []).append(a)
-
-        # 3. Calculate metrics in memory (avoids N*3 loop DB queries)
-        children_passed = 0
-        scores = []
-        for c in all_children:
-            c_attempts = attempts_by_child.get(c.id, [])
-            attempt_count = len(c_attempts)
-            if attempt_count > 0:
-                correct = sum(1 for a in c_attempts if a.is_correct)
-                score = round((correct / attempt_count) * 100, 2)
-                if score >= PASS_THRESHOLD:
-                    children_passed += 1
-                scores.append(score)
-
-        avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-        is_completed = children_passed == children_total and children_total > 0
+        
+        # 2. Check if the parent is passed
+        is_passed = self.is_parent_passed(user_id, parent_id)
+        
+        avg_score = 100.0 if is_passed else 0.0
+        children_passed = children_total if is_passed else 0
+        is_completed = is_passed
         
         progress = self.db.query(ParentChunkProgress).filter(
             ParentChunkProgress.user_id == user_id,
@@ -273,6 +312,8 @@ Return ONLY valid JSON (no markdown, no backticks, no extra text):
             progress.is_completed = is_completed
             if is_completed and not progress.completed_at:
                 progress.completed_at = datetime.now(timezone.utc)
+            elif not is_completed:
+                progress.completed_at = None
         
         self.db.commit()
 
@@ -293,7 +334,11 @@ Write a SHORT, SIMPLE explanation (3-4 sentences max) that helps them understand
         
         try:
             from google import genai as genai_sdk
-            client = genai_sdk.Client(api_key=settings.gemini_api_key)
+            from google.genai import types
+            client = genai_sdk.Client(
+                api_key=settings.gemini_api_key,
+                http_options=types.HttpOptions(timeout=30_000),
+            )
             response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
             return response.text.strip()
         except Exception as e:

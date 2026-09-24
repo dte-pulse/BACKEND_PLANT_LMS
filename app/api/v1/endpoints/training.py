@@ -16,6 +16,7 @@ from app.repositories.training_repository import TrainingRepository
 from app.schemas.training_evidence import TrainingEvidenceRead
 from app.services.training_service import TrainingService
 from app.services.notification_service import NotificationService
+from app.storage.file_storage import UploadValidationError
 
 router = APIRouter(prefix='/training', tags=['training'])
 
@@ -344,7 +345,7 @@ def upload_assignment_evidence(
 
     try:
         record = service.add_assignment_evidence(assignment_id, current_user.id, file, label=label)
-    except ValueError as e:
+    except (ValueError, UploadValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return TrainingEvidenceRead(
@@ -379,10 +380,13 @@ def download_assignment_evidence(
 
     storage = FileStorageService()
     content = storage.get_file_content(record.stored_name)
+    # VULN-007 (hardening): sanitize filename for the Content-Disposition header
+    # and mark the download as an attachment so browsers never render it inline.
+    safe_name = (record.file_name or 'evidence').replace('"', '').replace('\r', '').replace('\n', '')
     return StreamingResponse(
         iter([content]),
         media_type='application/octet-stream',
-        headers={'Content-Disposition': f'attachment; filename="{record.file_name}"'},
+        headers={'Content-Disposition': f'attachment; filename="{safe_name}"'},
     )
 
 
@@ -453,13 +457,28 @@ class AssignDocumentPayload(BaseModel):
 @router.get('/paths')
 def list_training_paths(db: Session = Depends(get_db)):
     """List all training paths dynamically based on database topics and documents."""
+    from app.services.response_cache import get_cache, PATHS_CACHE_TTL
+    cache = get_cache()
+    cached = cache.get('resp:paths:training')
+    if cached is not None:
+        return cached
+
     from app.models.topic import Topic
     from app.models.document import Document
+    from sqlalchemy import func
 
     topics = db.query(Topic).all()
+    # N+1 fix: one grouped count query instead of one COUNT per topic.
+    topic_ids = [t.id for t in topics]
+    doc_counts = dict(
+        db.query(Document.topic_id, func.count(Document.id))
+        .filter(Document.topic_id.in_(topic_ids))
+        .group_by(Document.topic_id)
+        .all()
+    ) if topic_ids else {}
     paths = []
     for t in topics:
-        docs_count = db.query(Document).filter(Document.topic_id == t.id).count()
+        docs_count = doc_counts.get(t.id, 0)
         paths.append({
             'id': t.id,
             'name': t.title,
@@ -483,6 +502,7 @@ def list_training_paths(db: Session = Depends(get_db)):
             'total_modules': docs_count,
             'documents_count': docs_count,
         })
+    cache.set('resp:paths:training', paths, PATHS_CACHE_TTL)
     return paths
 
 
