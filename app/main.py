@@ -40,7 +40,8 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault('Referrer-Policy', 'no-referrer')
     # The SPA is served separately; this API only needs to lock down its own docs.
     response.headers.setdefault(
-        'Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'"
+        'Content-Security-Policy',
+        "default-src 'none'; frame-ancestors 'none'; media-src 'self' https: data:"
     )
     response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
     return response

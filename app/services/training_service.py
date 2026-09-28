@@ -220,6 +220,7 @@ class TrainingService:
             status="completed",
             completed_at=datetime.now(timezone.utc)
         )
+        self._award_completion_coins(assignment)
         self._invalidate_caches(assignment.user_id)
         return result
 
@@ -237,8 +238,25 @@ class TrainingService:
             completed_at=datetime.now(timezone.utc)
         )
         self._sync_ojt_annexure(assignment)
+        self._award_completion_coins(assignment)
         self._invalidate_caches(assignment.user_id)
         return assignment
+
+    def _award_completion_coins(self, assignment) -> None:
+        """Reward assignment completion with coins (gamification).
+
+        Never breaks the completion flow: gamification failures are swallowed.
+        """
+        try:
+            from app.services.gamification_service import GamificationService
+            GamificationService(self.db).notify_event(
+                assignment.user_id,
+                'assignment_completed',
+                assignment_id=str(assignment.id),
+                document_id=assignment.document_id,
+            )
+        except Exception:  # noqa: BLE001 — rewards must never break learning
+            pass
 
     def trigger_induction_training(self, user_id: int, document_ids: list[int], assigned_by_id: int | None = None):
         assignments = []

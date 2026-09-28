@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 # Extension allowlist for general uploads (evidence, documents).
 ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.png', '.jpg', '.jpeg', '.webp'}
+# PPWEC media allowlist (§23 voice-over / captions / videos).
+PPWEC_MEDIA_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.m4a', '.webm', '.mp4', '.vtt'}
 # MIME types we consider safe to store verbatim for browser rendering.
 _SAFE_CONTENT_TYPES = {
     '.pdf': 'application/pdf',
@@ -19,6 +21,13 @@ _SAFE_CONTENT_TYPES = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.webp': 'image/webp',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.m4a': 'audio/mp4',
+    '.webm': 'video/webm',
+    '.mp4': 'video/mp4',
+    '.vtt': 'text/vtt',
 }
 
 class UploadValidationError(Exception):
@@ -49,6 +58,27 @@ def _check_magic_bytes(content: bytes, stored_suffix: str) -> None:
     """Reject files whose content does not match their claimed type."""
     if stored_suffix == '.csv':
         return  # csv validated by caller (users import) / treated as text
+    if stored_suffix == '.vtt':
+        text = content[:4096].lstrip()
+        return_ok = text.startswith(b'WEBVTT') or text.startswith(b'NOTE')
+        if not return_ok:
+            raise UploadValidationError('Invalid WebVTT caption file — must start with WEBVTT.')
+        return
+    if stored_suffix in ('.mp3', '.wav', '.ogg', '.m4a', '.webm', '.mp4'):
+        # Audio/video containers: id3/MP3 sync, RIFF/WAVE, OggS, M4A, WebM/Matroska, MP4.
+        if content[:3] == b'ID3' or (len(content) > 2 and content[0] == 0xFF and (content[1] & 0xE0) == 0xE0):
+            return
+        if content.startswith(b'RIFF'):
+            return
+        if content.startswith(b'OggS'):
+            return
+        if content[4:8] in (b'ftyp',):  # MP4 / M4A
+            return
+        if content.startswith((b'\x1aE\xdf\xa3', b'\x0D\x38\x2B\x2B')):  # WebM / Matroska
+            return
+        raise UploadValidationError(
+            'File content does not match its audio/video extension.'
+        )
     if content.startswith(b'%PDF'):
         return
     if content.startswith(b'PK\x03\x04'):
@@ -120,6 +150,51 @@ class FileStorageService:
 
         file_url = str(file_path)
         return stored_name, file_type, file_url
+
+    def save_ppwec_media(self, upload: UploadFile) -> tuple[str, str, str]:
+        """Store a validated PPWEC audio/video/caption asset.
+
+        Returns (stored_name, media_kind, url). Local disk + S3, mirroring
+        save_upload(); uses the PPWEC media allowlist and container magic-byte
+        checks. media_kind ∈ audio | video | caption.
+        """
+        suffix = Path(upload.filename or '').suffix.lower()
+        if suffix not in PPWEC_MEDIA_EXTENSIONS:
+            raise UploadValidationError(
+                f'Media type "{suffix}" is not allowed. Allowed: '
+                f'{", ".join(sorted(PPWEC_MEDIA_EXTENSIONS))}.'
+            )
+        content = _check_size(upload)
+        _check_magic_bytes(content, suffix)
+
+        stored_name = f"ppwec/{uuid4().hex}{suffix}"
+        media_kind = ('caption' if suffix == '.vtt'
+                      else 'video' if suffix in ('.webm', '.mp4')
+                      else 'audio')
+
+        file_path = self.base_dir / stored_name
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(content)
+
+        if self.use_s3:
+            try:
+                content_type = _SAFE_CONTENT_TYPES.get(suffix, 'application/octet-stream')
+                self.s3_client.put_object(
+                    Bucket=settings.s3_bucket_name,
+                    Key=stored_name,
+                    Body=content,
+                    ContentType=content_type,
+                )
+                if settings.s3_endpoint_url:
+                    file_url = f"{settings.s3_endpoint_url}/{settings.s3_bucket_name}/{stored_name}"
+                else:
+                    file_url = f"https://{settings.s3_bucket_name}.s3.{settings.aws_region}.amazonaws.com/{stored_name}"
+                return stored_name, media_kind, file_url
+            except ClientError as e:
+                logger.error(f'PPWEC media S3 upload failed: {e}. Falling back to local storage URL.')
+
+        file_url = str(file_path)
+        return stored_name, media_kind, file_url
 
     def get_presigned_url(self, stored_name: str, expiration: int = 3600) -> str:
         if not self.use_s3:

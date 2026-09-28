@@ -265,23 +265,49 @@ def score_current_trace(name: str, value, data_type: str = 'NUMERIC', comment: s
         pass
 
 
-def flush_langfuse():
-    """Synchronously export queued events (call before process exit / shutdown)."""
+def flush_langfuse(timeout: float = 5.0) -> bool:
+    """Export queued events (call before process exit / shutdown). Bounded.
+
+    The OTLP exporter inside ``lf.flush()`` can block for a long time on
+    network issues — observed as intermittent TestClient teardown hangs. Run
+    the flush in a daemon thread and give up after ``timeout`` seconds: a
+    dropped batch is acceptable, a hung shutdown is not.
+    """
     lf = get_langfuse()
     if lf is None:
-        return
-    try:
-        lf.flush()
-    except Exception:  # noqa: BLE001
-        pass
+        return True
+    done = threading.Event()
+
+    def _run():
+        try:
+            lf.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, daemon=True, name='langfuse-flush').start()
+    return done.wait(timeout)
 
 
-def shutdown_langfuse():
-    """Stop the background exporter thread cleanly (app shutdown)."""
+def shutdown_langfuse(timeout: float = 5.0) -> bool:
+    """Stop the background exporter thread (app shutdown). Bounded like flush.
+
+    Returns True when the exporter stopped within ``timeout``; the thread is
+    daemon so a straggler never blocks process exit.
+    """
     lf = get_langfuse()
     if lf is None:
-        return
-    try:
-        lf.shutdown()
-    except Exception:  # noqa: BLE001
-        pass
+        return True
+    done = threading.Event()
+
+    def _run():
+        try:
+            lf.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, daemon=True, name='langfuse-shutdown').start()
+    return done.wait(timeout)

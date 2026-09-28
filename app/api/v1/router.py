@@ -21,6 +21,8 @@ from app.api.v1.endpoints.departments import router as departments_router
 from app.api.v1.endpoints.learning_session import router as learning_session_router
 from app.api.v1.endpoints.document_assignments import router as document_assignments_router
 from app.api.v1.endpoints.observability import router as observability_router
+from app.api.v1.endpoints.ppwec import router as ppwec_router
+from app.api.v1.endpoints.gamification import router as gamification_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -47,4 +49,9 @@ api_router.include_router(observability_router, dependencies=auth_deps)
 api_router.include_router(calendar_router, dependencies=auth_deps)
 api_router.include_router(attendance_router, dependencies=auth_deps)
 api_router.include_router(annexure_router, dependencies=auth_deps)
+# PPWEC manages auth per-route: media streaming authenticates via short-lived
+# signed playback tokens (media elements cannot send Authorization headers),
+# while every other route declares get_current_user / require_role explicitly.
+api_router.include_router(ppwec_router)
+api_router.include_router(gamification_router, dependencies=auth_deps)
 

@@ -184,6 +184,9 @@ class AdaptiveAgentService:
             # 3. Progress sync (UserProgress + assignment completion).
             self._sync_user_progress(user_id, chunk, time_taken_seconds)
 
+            # 3b. Gamification: coins for the attempt + chunk completion.
+            self._award_learning_coins(user_id, chunk, eval_result['is_correct'], attempt)
+
             # 4. Curriculum agent recommends the next step.
             with langfuse_observation(
                 name='curriculum-next-step',
@@ -241,6 +244,25 @@ class AdaptiveAgentService:
                     },
                 },
             }
+
+    def _award_learning_coins(self, user_id: int, chunk, is_correct: bool, attempt) -> None:
+        """Best-effort coin awards for the adaptive answer loop.
+
+        Per-attempt coins reference the attempt id (dedup-safe across retries);
+        a child-chunk completion bonus fires once per (user, chunk).
+        """
+        try:
+            from app.services.gamification_service import GamificationService
+            gam = GamificationService(self.db)
+            event = 'mcq_passed' if is_correct else 'mcq_failed'
+            attempt_id = str(getattr(attempt, 'id', None) or f"{user_id}-{getattr(chunk, 'id', None)}")
+            gam.notify_event(user_id, event, attempt_id=attempt_id,
+                             document_id=getattr(chunk, 'document_id', None))
+            if getattr(attempt, 'attempt_number', None) == 1 and is_correct:
+                gam.notify_event(user_id, 'chunk_completed', chunk_id=str(chunk.id),
+                                 document_id=getattr(chunk, 'document_id', None))
+        except Exception:  # noqa: BLE001 — rewards must never break learning
+            pass
 
     # ── Progress sync (ported from LearningSessionService.submit_child_answer) ──
 

@@ -259,6 +259,21 @@ def submit_answer(
         time_spent_seconds=payload.time_spent_seconds,
     )
 
+    # Gamification (best-effort): coins for the attempt + first-time chunk completion.
+    try:
+        from app.services.gamification_service import GamificationService
+        gam = GamificationService(service.db)
+        gam.notify_event(current_user.id,
+                         'mcq_passed' if evaluation['is_correct'] else 'mcq_failed',
+                         attempt_id=f"legacy-{payload.mcq_id}-{current_user.id}",
+                         document_id=current_chunk.document_id)
+        if evaluation['is_correct'] and chunk_id not in set(payload.completed_chunk_ids):
+            gam.notify_event(current_user.id, 'chunk_completed', chunk_id=str(chunk_id),
+                             document_id=current_chunk.document_id)
+        service.db.commit()
+    except Exception:  # noqa: BLE001 — rewards must never break learning
+        service.db.rollback()
+
     progress_pct = (len(completed_ids) / total_chunks * 100) if total_chunks > 0 else 0.0
 
     response: dict = {

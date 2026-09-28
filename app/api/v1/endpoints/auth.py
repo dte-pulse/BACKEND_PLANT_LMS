@@ -65,6 +65,16 @@ def login(
             ip_address=ip_address,
             details=f"User logged in with role: {result['role']}"
     )
+
+    # Gamification: daily-login coins (first login per UTC day only — the
+    # dedup key is the date, so repeats are no-ops).
+    try:
+        from app.services.gamification_service import GamificationService
+        GamificationService(db).notify_event(result['user_id'], 'daily_login')
+        db.commit()
+    except Exception:  # noqa: BLE001 — rewards must never break login
+        db.rollback()
+
     return result
 
 

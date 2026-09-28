@@ -35,6 +35,24 @@ from app.models.user_progress import UserProgress
 from app.models.user_qa_session import UserQaSession
 from app.models.user_weakness_profile import UserWeaknessProfile
 from app.models.user_concept_mastery import UserConceptMastery
+from app.models.ppwec import (
+    PpwecModule,
+    PpwecScreen,
+    PpwecQuestion,
+    PpwecUserModuleState,
+    PpwecAssessmentAttempt,
+    PpwecPointsLedger,
+    PpwecBadge,
+    PpwecUserBadge,
+    PpwecChallengeProgress,
+)
+from app.models.gamification import CoinLedger, UserStreak
+from app.models.ppwec_governance import (
+    PpwecPilotFeedback,
+    PpwecReviewSignoff,
+    PpwecDesignFreeze,
+    PpwecValidationRun,
+)
 
 __all__ = [
     'User', 'UserRole',
@@ -48,6 +66,11 @@ __all__ = [
     'TrainingAssignment',
     'TrainingEvidence',
     'UserProgress', 'UserMcqAttempt', 'UserQaSession', 'UserWeaknessProfile', 'UserConceptMastery',
+    'PpwecModule', 'PpwecScreen', 'PpwecQuestion', 'PpwecUserModuleState',
+    'PpwecAssessmentAttempt', 'PpwecPointsLedger', 'PpwecBadge', 'PpwecUserBadge',
+    'PpwecChallengeProgress',
+    'CoinLedger', 'UserStreak',
+    'PpwecPilotFeedback', 'PpwecReviewSignoff', 'PpwecDesignFreeze', 'PpwecValidationRun',
     'Notification',
     'CalendarEvent', 'Attendance',
     'TokenUsageLog',
