@@ -242,6 +242,12 @@ class McqService:
                 self.db.add(new_assignment)
             self.db.commit()
         
+        # Gamification: passing the qualification exam completes the training
+        # assignment directly (bypassing TrainingService.complete_assignment),
+        # so the documented assignment-completion coins are awarded here.
+        # Dedup happens on the assignment id — re-passing never double-pays.
+        coins_earned = 0
+
         # If passed, we might also record a 100% score for weakness to balance it out
         if passed:
              for submission in payload.submissions:
@@ -266,6 +272,19 @@ class McqService:
                      assignment.status = "pending_verification"
                  else:
                      assignment.status = "completed"
+                     try:
+                         from app.services.gamification_service import GamificationService
+                         awarded = GamificationService(self.db).notify_event(
+                             user_id,
+                             'assignment_completed',
+                             assignment_id=str(assignment.id),
+                             document_id=payload.document_id,
+                         )
+                         coins_earned += awarded or 0
+                     except Exception:  # noqa: BLE001 — rewards must never break exams
+                         logger.debug('Exam coin award failed', exc_info=True)
+                 self.db.commit()
+             else:
                  self.db.commit()
         
         return {
@@ -273,7 +292,8 @@ class McqService:
             "passed": passed,
             "total_questions": total_questions,
             "correct_answers": correct_answers,
-            "feedback": feedback
+            "feedback": feedback,
+            "coins_earned": coins_earned,
         }
 
     def get_final_assessment(self, document_id: int, count: int = 10):

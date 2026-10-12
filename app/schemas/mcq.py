@@ -68,3 +68,4 @@ class MCQAssessmentResult(BaseModel):
     total_questions: int
     correct_answers: int
     feedback: list[dict] # e.g. [{"mcq_id": 1, "is_correct": true, "correct_option": "A", "explanation": "..."}]
+    coins_earned: int = 0  # gamification: assignment-completion coins on pass
